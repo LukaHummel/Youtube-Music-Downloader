@@ -37,6 +37,34 @@ python -m ytmusic_jellyfin_bot
 
 The runtime expects `yt-dlp`, `beet`, and `ffmpeg` to be available. The Docker image installs them automatically.
 
+## Container Image
+
+This repo is configured to publish a Docker image to GitHub Container Registry:
+
+- `ghcr.io/lukahummel/youtube-music-downloader:latest` from pushes to `main`
+- `ghcr.io/lukahummel/youtube-music-downloader:vX.Y.Z` from git tags like `v0.1.0`
+
+If the package should be pullable without authentication, set the GitHub package visibility to public after the first publish.
+
+## Unraid
+
+Use this image in Unraid:
+
+- `ghcr.io/lukahummel/youtube-music-downloader:latest`
+
+Recommended container paths and variables:
+
+- `/music` mapped to your Jellyfin music library
+- `/staging` mapped to temporary download storage
+- `/data` mapped to app state storage
+- `/run/secrets/youtube_cookies.txt` mapped read-only if you need private playlists
+- `TELEGRAM_BOT_TOKEN`
+- `ALLOWED_TELEGRAM_IDS`
+- `WORKER_CONCURRENCY`
+- `LOG_LEVEL`
+
+The app already defaults to `/music`, `/staging`, `/data`, and `/run/secrets/youtube_cookies.txt`, so those are the simplest paths to keep in the Unraid template.
+
 ## Bot Commands
 
 - `/help`
