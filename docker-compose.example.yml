@@ -1,0 +1,11 @@
+services:
+  ytmusic-jellyfin-bot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - /srv/jellyfin/music:/music
+      - /srv/ytmusic/staging:/staging
+      - /srv/ytmusic/data:/data
+      - /srv/ytmusic/secrets/youtube_cookies.txt:/run/secrets/youtube_cookies.txt:ro
