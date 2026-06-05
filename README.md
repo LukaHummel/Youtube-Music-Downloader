@@ -55,7 +55,7 @@ Use this image in Unraid:
 Recommended container paths and variables:
 
 - `/music` mapped to your Jellyfin music library
-- `/staging` mapped to temporary download storage
+- `/downloads` mapped to temporary download storage
 - `/data` mapped to app state storage
 - `/run/secrets/youtube_cookies.txt` mapped read-only if you need private playlists
 - `TELEGRAM_BOT_TOKEN`
@@ -63,7 +63,7 @@ Recommended container paths and variables:
 - `WORKER_CONCURRENCY`
 - `LOG_LEVEL`
 
-The app already defaults to `/music`, `/staging`, `/data`, and `/run/secrets/youtube_cookies.txt`, so those are the simplest paths to keep in the Unraid template.
+The app already defaults to `/music`, `/downloads`, `/data`, and `/run/secrets/youtube_cookies.txt`, so those are the simplest paths to keep in the Unraid template.
 
 ## Bot Commands
 

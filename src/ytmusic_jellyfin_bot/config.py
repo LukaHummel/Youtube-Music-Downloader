@@ -39,7 +39,7 @@ class AppConfig:
             telegram_bot_token=token,
             allowed_telegram_ids=_parse_allowed_ids(raw_ids),
             music_library_dir=Path(os.environ.get("MUSIC_LIBRARY_DIR", "/music")).resolve(),
-            staging_dir=Path(os.environ.get("STAGING_DIR", "/staging")).resolve(),
+            staging_dir=Path(os.environ.get("STAGING_DIR", "/downloads")).resolve(),
             app_state_dir=Path(os.environ.get("APP_STATE_DIR", "/data")).resolve(),
             ytdlp_cookies_file=Path(
                 os.environ.get("YTDLP_COOKIES_FILE", "/run/secrets/youtube_cookies.txt")
