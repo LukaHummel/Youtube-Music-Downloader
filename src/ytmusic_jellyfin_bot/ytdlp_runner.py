@@ -141,12 +141,15 @@ class YtDlpRunner:
             stderr=asyncio.subprocess.PIPE,
         )
         stdout_bytes, stderr_bytes = await process.communicate()
+        returncode = process.returncode
+        if returncode is None:
+            raise YtDlpError("yt-dlp exited without a return code.")
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
         error_output = stderr or stdout
-        if process.returncode != 0 and _contains_auth_marker(error_output):
+        if returncode != 0 and _contains_auth_marker(error_output):
             raise YtDlpError(self._format_error(error_output), auth_required=True)
-        return stdout, stderr, process.returncode
+        return stdout, stderr, returncode
 
     @staticmethod
     def _build_item_from_entry(entry: dict[str, Any], index: int, playlist_id: str | None) -> PreflightItem:
