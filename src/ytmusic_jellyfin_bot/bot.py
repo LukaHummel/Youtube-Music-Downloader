@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from telegram import Update
+from telegram import Chat, Message, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from .config import AppConfig
@@ -54,6 +54,7 @@ class TelegramBotService:
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._ensure_allowed(update):
             return
+        message = self._require_message(update)
         text = (
             "Send a YouTube or YouTube Music track or playlist URL to queue it.\n\n"
             "/track <url> forces single-track handling.\n"
@@ -65,8 +66,7 @@ class TelegramBotService:
             "/cancel <job_id> cancels a queued job or requests cancellation for the active one.\n\n"
             "Private playlists require a valid mounted cookies.txt file."
         )
-        if update.effective_message:
-            await update.effective_message.reply_text(text)
+        await message.reply_text(text)
 
     async def track_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._submit_from_command(update, context, RequestKind.TRACK)
@@ -77,20 +77,22 @@ class TelegramBotService:
     async def text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._ensure_allowed(update):
             return
-        text = (update.effective_message.text or "").strip()
+        message = self._require_message(update)
+        text = (message.text or "").strip()
         if "youtube.com" not in text and "youtu.be" not in text and "music.youtube.com" not in text:
-            await update.effective_message.reply_text("Send a YouTube or YouTube Music URL.")
+            await message.reply_text("Send a YouTube or YouTube Music URL.")
             return
         await self._submit_job(update, text, None)
 
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._ensure_allowed(update):
             return
+        message = self._require_message(update)
         if context.args:
             try:
                 job = self.db.get_job(int(context.args[0]))
             except (ValueError, KeyError):
-                await update.effective_message.reply_text("Unknown job ID.")
+                await message.reply_text("Unknown job ID.")
                 return
             items = self.db.get_job_items(job.id)
             current = f"{job.current_item_index}/{job.total_items}" if job.total_items else "0/0"
@@ -108,13 +110,13 @@ class TelegramBotService:
                 f"Error: {job.error_message or 'n/a'}\n"
                 f"Tracked items: {len(items)}"
             )
-            await update.effective_message.reply_text(text)
+            await message.reply_text(text)
             return
 
         active = self.db.get_active_job()
         queue_depth = self.db.count_queued_jobs()
         if not active:
-            await update.effective_message.reply_text(f"No active job. Queue depth: {queue_depth}")
+            await message.reply_text(f"No active job. Queue depth: {queue_depth}")
             return
         lines = [
             f"Active job: #{active.id}",
@@ -124,62 +126,65 @@ class TelegramBotService:
         ]
         if active.progress_percent is not None:
             lines.insert(3, f"Progress: {active.progress_percent:.1f}%")
-        await update.effective_message.reply_text("\n".join(lines))
+        await message.reply_text("\n".join(lines))
 
     async def jobs_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._ensure_allowed(update):
             return
+        message = self._require_message(update)
         jobs = self.db.list_recent_jobs()
         if not jobs:
-            await update.effective_message.reply_text("No jobs recorded yet.")
+            await message.reply_text("No jobs recorded yet.")
             return
         lines = [
             f"#{job.id} {job.status} {job.request_kind} {job.current_item_index}/{job.total_items} {job.source_title or job.source_url}"
             for job in jobs
         ]
-        await update.effective_message.reply_text("\n".join(lines))
+        await message.reply_text("\n".join(lines))
 
     async def retry_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._ensure_allowed(update):
             return
+        message = self._require_message(update)
         if not context.args:
-            await update.effective_message.reply_text("Usage: /retry <job_id>")
+            await message.reply_text("Usage: /retry <job_id>")
             return
         try:
             job_id = int(context.args[0])
         except ValueError:
-            await update.effective_message.reply_text("Job ID must be numeric.")
+            await message.reply_text("Job ID must be numeric.")
             return
         if not self.db.requeue_job(job_id):
-            await update.effective_message.reply_text("Only failed, partial, or cancelled jobs can be retried.")
+            await message.reply_text("Only failed, partial, or cancelled jobs can be retried.")
             return
         self.worker.wake()
-        await update.effective_message.reply_text(f"Job #{job_id} requeued.")
+        await message.reply_text(f"Job #{job_id} requeued.")
 
     async def cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._ensure_allowed(update):
             return
+        message = self._require_message(update)
         if not context.args:
-            await update.effective_message.reply_text("Usage: /cancel <job_id>")
+            await message.reply_text("Usage: /cancel <job_id>")
             return
         try:
             job_id = int(context.args[0])
         except ValueError:
-            await update.effective_message.reply_text("Job ID must be numeric.")
+            await message.reply_text("Job ID must be numeric.")
             return
         if self.db.cancel_if_queued(job_id):
-            await update.effective_message.reply_text(f"Queued job #{job_id} cancelled.")
+            await message.reply_text(f"Queued job #{job_id} cancelled.")
             return
         try:
             job = self.db.get_job(job_id)
         except KeyError:
-            await update.effective_message.reply_text("Unknown job ID.")
+            await message.reply_text("Unknown job ID.")
             return
         if job.status in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}:
-            await update.effective_message.reply_text(f"Job #{job_id} is already finished.")
+            await message.reply_text(f"Job #{job_id} is already finished.")
             return
         self.db.mark_cancel_requested(job_id)
-        await update.effective_message.reply_text(f"Cancellation requested for job #{job_id}.")
+        await message.reply_text(f"Cancellation requested for job #{job_id}.")
 
     async def _submit_from_command(
         self,
@@ -189,21 +194,24 @@ class TelegramBotService:
     ) -> None:
         if not await self._ensure_allowed(update):
             return
+        message = self._require_message(update)
         if not context.args:
-            await update.effective_message.reply_text(f"Usage: /{request_kind.value} <url>")
+            await message.reply_text(f"Usage: /{request_kind.value} <url>")
             return
         await self._submit_job(update, context.args[0], request_kind)
 
     async def _submit_job(
         self, update: Update, raw_url: str, forced_kind: RequestKind | None
     ) -> None:
+        message = self._require_message(update)
+        chat = self._require_chat(update)
         try:
             normalized = normalize_url(raw_url, forced_kind)
         except NormalizationError as exc:
-            await update.effective_message.reply_text(str(exc))
+            await message.reply_text(str(exc))
             return
 
-        chat_id = update.effective_chat.id
+        chat_id = chat.id
         user = update.effective_user
         requested_by = user.username or user.full_name if user else None
         job = self.db.create_job(
@@ -217,13 +225,13 @@ class TelegramBotService:
         )
         self.db.add_message(
             direction="incoming",
-            body=update.effective_message.text or raw_url,
+            body=message.text or raw_url,
             job_id=job.id,
             telegram_chat_id=chat_id,
             telegram_user_id=user.id if user else None,
         )
         self.worker.wake()
-        await update.effective_message.reply_text(
+        await message.reply_text(
             f"Queued job #{job.id} as {normalized.request_kind}.\n{normalized.normalized_url}"
         )
 
@@ -242,6 +250,21 @@ class TelegramBotService:
             user.id if user else None,
             chat.id if chat else None,
         )
-        if update.effective_message:
-            await update.effective_message.reply_text("This bot is restricted to configured Telegram IDs.")
+        message = update.effective_message
+        if message is not None:
+            await message.reply_text("This bot is restricted to configured Telegram IDs.")
         return False
+
+    @staticmethod
+    def _require_message(update: Update) -> Message:
+        message = update.effective_message
+        if message is None:
+            raise ValueError("Telegram update does not include a message.")
+        return message
+
+    @staticmethod
+    def _require_chat(update: Update) -> Chat:
+        chat = update.effective_chat
+        if chat is None:
+            raise ValueError("Telegram update does not include a chat.")
+        return chat
