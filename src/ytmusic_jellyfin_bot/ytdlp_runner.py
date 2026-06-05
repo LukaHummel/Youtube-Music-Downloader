@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
+import shlex
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -11,15 +13,27 @@ from .models import DownloadResult, PreflightItem, PreflightResult, RequestKind
 
 ProgressCallback = Callable[[float | None, int | None, str | None], Awaitable[None]]
 
-AUTH_ERROR_MARKERS = ("private video", "private playlist", "sign in", "cookies", "members-only")
+LOGGER = logging.getLogger(__name__)
+
+AUTH_ERROR_MARKERS = (
+    "private video",
+    "private playlist",
+    "members-only",
+    "sign in",
+    "cookies",
+    "not a bot",
+    "confirm your age",
+    "age-restricted",
+)
 PROGRESS_RE = re.compile(r"^download:(?P<percent>[^|]*)\|(?P<speed>[^|]*)\|(?P<eta>[^|]*)\|")
 AUDIO_SUFFIXES = {".aac", ".m4a", ".mp3", ".opus", ".flac", ".wav", ".ogg", ".alac"}
 
 
 class YtDlpError(RuntimeError):
-    def __init__(self, message: str, *, auth_required: bool = False):
+    def __init__(self, message: str, *, auth_required: bool = False, output: str | None = None):
         super().__init__(message)
         self.auth_required = auth_required
+        self.output = output
 
 
 class YtDlpRunner:
@@ -31,17 +45,23 @@ class YtDlpRunner:
             [*self._base_command(), "--dump-single-json", "--skip-download", "--no-warnings", url]
         )
         if returncode != 0:
-            raise YtDlpError(self._format_error(stderr or stdout))
+            output = stderr or stdout
+            raise YtDlpError(
+                self._format_error(output),
+                auth_required=_contains_auth_marker(output),
+                output=output,
+            )
         try:
             payload = json.loads(stdout.strip())
         except json.JSONDecodeError as exc:
-            raise YtDlpError("yt-dlp did not return valid JSON during preflight.") from exc
+            raise YtDlpError(
+                "yt-dlp did not return valid JSON during preflight.",
+                output=stderr or stdout,
+            ) from exc
 
         if request_kind is RequestKind.TRACK:
-            if not self._is_music_like(payload):
-                raise YtDlpError(
-                    "This URL does not resolve to a clear YouTube Music track. Submit a music track or playlist URL."
-                )
+            if not payload.get("id"):
+                raise YtDlpError("This URL does not resolve to a downloadable YouTube video.")
             item = self._build_item_from_entry(payload, 1, payload.get("id"))
             return PreflightResult(
                 source_id=payload.get("id") or "unknown",
@@ -88,6 +108,12 @@ class YtDlpRunner:
             "%(album,artist,playlist_title,creator)s/%(track,title)s.%(ext)s",
             url,
         ]
+        LOGGER.debug(
+            "Running yt-dlp download command for job_id=%s item_index=%s: %s",
+            job_id,
+            item_index,
+            _format_command(command),
+        )
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
@@ -103,6 +129,7 @@ class YtDlpRunner:
             if not text:
                 continue
             collected.append(text)
+            LOGGER.debug("yt-dlp job_id=%s item_index=%s output: %s", job_id, item_index, text)
             match = PROGRESS_RE.match(text)
             if match:
                 await progress_callback(
@@ -113,7 +140,11 @@ class YtDlpRunner:
         returncode = await process.wait()
         if returncode != 0:
             output = "\n".join(collected)
-            raise YtDlpError(self._format_error(output), auth_required=_contains_auth_marker(output))
+            raise YtDlpError(
+                self._format_error(output),
+                auth_required=_contains_auth_marker(output),
+                output=output,
+            )
 
         audio_candidates = sorted(
             (
@@ -124,7 +155,10 @@ class YtDlpRunner:
             key=lambda path: len(path.parts),
         )
         if not audio_candidates:
-            raise YtDlpError("yt-dlp finished without producing an audio file.")
+            raise YtDlpError(
+                "yt-dlp finished without producing an audio file.",
+                output="\n".join(collected),
+            )
         info_json_path = next((path for path in item_dir.rglob("*.info.json") if path.is_file()), None)
         return DownloadResult(audio_path=audio_candidates[0], info_json_path=info_json_path)
 
@@ -135,6 +169,7 @@ class YtDlpRunner:
         return command
 
     async def _run_capture(self, command: list[str]) -> tuple[str, str, int]:
+        LOGGER.debug("Running yt-dlp command: %s", _format_command(command))
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
@@ -146,9 +181,12 @@ class YtDlpRunner:
             raise YtDlpError("yt-dlp exited without a return code.")
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
-        error_output = stderr or stdout
-        if returncode != 0 and _contains_auth_marker(error_output):
-            raise YtDlpError(self._format_error(error_output), auth_required=True)
+        LOGGER.debug(
+            "yt-dlp command finished returncode=%s stdout_bytes=%s stderr_bytes=%s",
+            returncode,
+            len(stdout_bytes),
+            len(stderr_bytes),
+        )
         return stdout, stderr, returncode
 
     @staticmethod
@@ -166,10 +204,6 @@ class YtDlpRunner:
             album=entry.get("album"),
             metadata=entry,
         )
-
-    @staticmethod
-    def _is_music_like(payload: dict[str, Any]) -> bool:
-        return bool(payload.get("track") or payload.get("album") or payload.get("artist") or payload.get("artists"))
 
     @staticmethod
     def _format_error(output: str) -> str:
@@ -217,3 +251,7 @@ def _coalesce_artist(payload: dict[str, Any]) -> str | None:
 def _contains_auth_marker(output: str) -> bool:
     lowered = output.lower()
     return any(marker in lowered for marker in AUTH_ERROR_MARKERS)
+
+
+def _format_command(command: list[str]) -> str:
+    return " ".join(shlex.quote(piece) for piece in command)

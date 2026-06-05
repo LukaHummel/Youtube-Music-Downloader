@@ -32,6 +32,8 @@ Optional environment variables:
 - `TELEGRAM_CONNECT_TIMEOUT`, `TELEGRAM_READ_TIMEOUT`, `TELEGRAM_WRITE_TIMEOUT`, and `TELEGRAM_POOL_TIMEOUT` tune Bot API HTTP timeouts in seconds. They default to `30`.
 - `TELEGRAM_POLL_TIMEOUT` controls Telegram long-poll duration in seconds. It defaults to `10`.
 - `TELEGRAM_BOOTSTRAP_RETRIES` controls startup retries. It defaults to `-1`, which retries indefinitely after Telegram network errors.
+- `LOG_LEVEL` controls this app's logs. It defaults to `INFO`.
+- `EXTERNAL_LOG_LEVEL` controls noisy dependency logs from Telegram/httpx. It defaults to `WARNING`.
 
 ## Local Run
 

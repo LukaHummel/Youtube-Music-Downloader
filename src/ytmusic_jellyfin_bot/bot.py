@@ -57,6 +57,7 @@ class TelegramBotService:
 
     async def send_notification(self, chat_id: int, message: str, job_id: int | None) -> None:
         assert self.application is not None
+        LOGGER.debug("Sending Telegram message for job_id=%s chat_id=%s", job_id, chat_id)
         await self.application.bot.send_message(chat_id=chat_id, text=message)
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -221,7 +222,8 @@ class TelegramBotService:
 
         chat_id = chat.id
         user = update.effective_user
-        requested_by = user.username or user.full_name if user else None
+        requested_by = (user.username or user.full_name) if user else None
+        requester = (requested_by or str(user.id)) if user else "unknown"
         job = self.db.create_job(
             source_url=normalized.source_url,
             normalized_url=normalized.normalized_url,
@@ -237,6 +239,14 @@ class TelegramBotService:
             job_id=job.id,
             telegram_chat_id=chat_id,
             telegram_user_id=user.id if user else None,
+        )
+        LOGGER.info(
+            "Queued job #%s from Telegram: type=%s user=%s chat_id=%s url=%s",
+            job.id,
+            normalized.request_kind,
+            requester,
+            chat_id,
+            normalized.normalized_url,
         )
         self.worker.wake()
         await message.reply_text(

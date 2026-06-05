@@ -17,6 +17,7 @@ from .ytdlp_runner import YtDlpError, YtDlpRunner
 Notifier = Callable[[int, str, int | None], Awaitable[None]]
 
 LOGGER = logging.getLogger(__name__)
+MAX_ERROR_DETAIL_LENGTH = 1500
 
 
 class JobWorker:
@@ -45,6 +46,7 @@ class JobWorker:
     async def start(self) -> None:
         if self._task is None:
             self._task = asyncio.create_task(self._run_loop(), name="job-worker")
+            LOGGER.info("Job worker started")
             self.wake()
 
     async def stop(self) -> None:
@@ -57,6 +59,7 @@ class JobWorker:
             except asyncio.CancelledError:
                 pass
             self._task = None
+            LOGGER.info("Job worker stopped")
 
     def wake(self) -> None:
         self._wake_event.set()
@@ -81,6 +84,13 @@ class JobWorker:
                 await self._notify(job.chat_id, f"Job #{job.id} failed with an internal error.", job.id)
 
     async def _process_job(self, job: JobRecord) -> None:
+        LOGGER.info(
+            "Job #%s started: type=%s requested_by=%s url=%s",
+            job.id,
+            job.request_kind,
+            job.requested_by or "unknown",
+            job.normalized_url,
+        )
         self.db.update_job(
             job.id,
             status=JobStatus.NORMALIZING,
@@ -94,14 +104,23 @@ class JobWorker:
             progress_speed=None,
         )
         self.db.update_job(job.id, status=JobStatus.PREFLIGHT)
+        LOGGER.info("Job #%s preflight started", job.id)
 
         try:
             preflight = await self.ytdlp.preflight(job.normalized_url, job.request_kind)
         except YtDlpError as exc:
             message = (
-                "Private or restricted YouTube content requires a fresh mounted cookies.txt file."
+                "YouTube requires authentication for this request. This can happen with private or "
+                "restricted content, age gates, or YouTube bot checks. Mount or refresh cookies.txt."
                 if exc.auth_required
                 else str(exc)
+            )
+            LOGGER.error(
+                "Job #%s preflight failed: auth_required=%s message=%s details=%s",
+                job.id,
+                exc.auth_required,
+                str(exc),
+                _error_details(exc),
             )
             self.db.update_job(
                 job.id,
@@ -113,6 +132,13 @@ class JobWorker:
             return
 
         self.db.replace_job_items(job.id, preflight.items)
+        LOGGER.info(
+            "Job #%s preflight completed: source_id=%s title=%s items=%s",
+            job.id,
+            preflight.source_id,
+            preflight.source_title or "unknown",
+            len(preflight.items),
+        )
         self.db.update_job(
             job.id,
             source_id=preflight.source_id,
@@ -129,6 +155,7 @@ class JobWorker:
 
         for item in self.db.get_job_items(job.id):
             if self.db.is_cancel_requested(job.id):
+                LOGGER.warning("Job #%s cancellation requested at item %s", job.id, item.item_index)
                 self._cancel_remaining_items(job.id)
                 self.db.update_job(
                     job.id,
@@ -144,6 +171,13 @@ class JobWorker:
             if mapping and Path(mapping["final_path"]).exists():
                 duplicate_count += 1
                 final_path = Path(mapping["final_path"])
+                LOGGER.info(
+                    "Job #%s item %s skipped existing file: video_id=%s path=%s",
+                    job.id,
+                    item.item_index,
+                    item.youtube_video_id or "unknown",
+                    final_path,
+                )
                 self.db.update_job(
                     job.id,
                     status=JobStatus.DOWNLOADING,
@@ -163,6 +197,14 @@ class JobWorker:
                 current_item_index=item.item_index,
             )
             self.db.update_job_item(item.id, status=ItemStatus.DOWNLOADING)
+            LOGGER.info(
+                "Job #%s item %s/%s download started: video_id=%s title=%s",
+                job.id,
+                item.item_index,
+                len(preflight.items),
+                item.youtube_video_id or "unknown",
+                item.title or "unknown",
+            )
 
             try:
                 download_result = await self.ytdlp.download_track(
@@ -176,14 +218,28 @@ class JobWorker:
             except YtDlpError as exc:
                 failed_count += 1
                 failure_message = (
-                    "Private or restricted content could not be downloaded. Refresh the mounted cookies.txt file."
+                    "YouTube requires authentication for this download. Refresh the mounted cookies.txt file."
                     if exc.auth_required
                     else str(exc)
+                )
+                LOGGER.warning(
+                    "Job #%s item %s download failed: auth_required=%s message=%s details=%s",
+                    job.id,
+                    item.item_index,
+                    exc.auth_required,
+                    str(exc),
+                    _error_details(exc),
                 )
                 self.db.update_job_item(item.id, status=ItemStatus.FAILED, error_message=failure_message)
                 continue
 
             self.db.update_job(job.id, status=JobStatus.RETAGGING)
+            LOGGER.info(
+                "Job #%s item %s download completed: path=%s",
+                job.id,
+                item.item_index,
+                download_result.audio_path,
+            )
             self.db.update_job_item(
                 item.id,
                 status=ItemStatus.RETAGGING,
@@ -195,6 +251,12 @@ class JobWorker:
                 import_result = await self.beets.import_track(download_result.audio_path, metadata)
             except BeetsError as exc:
                 failed_count += 1
+                LOGGER.warning(
+                    "Job #%s item %s beets import failed: %s",
+                    job.id,
+                    item.item_index,
+                    str(exc),
+                )
                 self.db.update_job_item(item.id, status=ItemStatus.FAILED, error_message=str(exc))
                 continue
 
@@ -209,9 +271,22 @@ class JobWorker:
                 if import_result.status == "imported":
                     imported_count += 1
                     item_status = ItemStatus.IMPORTED
+                    LOGGER.info(
+                        "Job #%s item %s imported: path=%s",
+                        job.id,
+                        item.item_index,
+                        final_path,
+                    )
                 else:
                     duplicate_count += 1
                     item_status = ItemStatus.SKIPPED_EXISTING
+                    LOGGER.info(
+                        "Job #%s item %s matched existing beets item: path=%s reason=%s",
+                        job.id,
+                        item.item_index,
+                        final_path,
+                        import_result.reason or "duplicate",
+                    )
                 self.db.update_job_item(
                     item.id,
                     status=item_status,
@@ -233,6 +308,11 @@ class JobWorker:
 
             if import_result.status == "duplicate_ambiguous":
                 ambiguous_count += 1
+                LOGGER.warning(
+                    "Job #%s item %s skipped due to ambiguous duplicate candidates",
+                    job.id,
+                    item.item_index,
+                )
                 self.db.update_job_item(
                     item.id,
                     status=ItemStatus.SKIPPED_AMBIGUOUS,
@@ -241,6 +321,13 @@ class JobWorker:
                 continue
 
             failed_count += 1
+            LOGGER.warning(
+                "Job #%s item %s import did not resolve: status=%s reason=%s",
+                job.id,
+                item.item_index,
+                import_result.status,
+                import_result.reason or "unknown",
+            )
             self.db.update_job_item(
                 item.id,
                 status=ItemStatus.FAILED,
@@ -256,6 +343,7 @@ class JobWorker:
                 playlist_id=preflight.source_id,
                 track_paths=track_paths,
             )
+            LOGGER.info("Job #%s playlist written: path=%s", job.id, playlist_path)
 
         summary = (
             f"Imported: {imported_count}, duplicates: {duplicate_count}, failed: {failed_count}, "
@@ -272,6 +360,8 @@ class JobWorker:
             progress_eta_seconds=0,
             finished_at=self._timestamp(),
         )
+        log_method = LOGGER.info if final_status is JobStatus.COMPLETED else LOGGER.warning
+        log_method("Job #%s finished: status=%s %s", job.id, final_status, summary)
         await self._notify(job.chat_id, f"Job #{job.id} finished.\n{summary}", job.id)
 
     async def _update_progress(
@@ -294,6 +384,7 @@ class JobWorker:
             try:
                 info_metadata = json.loads(info_json_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
+                LOGGER.warning("Ignoring invalid info.json for job_item_id=%s path=%s", item.id, info_json_path)
                 return metadata
             info_metadata.update({key: value for key, value in metadata.items() if value})
             return info_metadata
@@ -307,8 +398,22 @@ class JobWorker:
     async def _notify(self, chat_id: int, message: str, job_id: int | None) -> None:
         self.db.add_message(direction="outgoing", body=message, job_id=job_id, telegram_chat_id=chat_id)
         if self._notifier:
+            LOGGER.debug("Sending Telegram notification for job_id=%s chat_id=%s", job_id, chat_id)
             await self._notifier(chat_id, message, job_id)
 
     @staticmethod
     def _timestamp() -> str:
         return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _error_details(exc: YtDlpError) -> str:
+    output = exc.output
+    if not output:
+        return str(exc)
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return str(exc)
+    details = " | ".join(lines[-5:])
+    if len(details) <= MAX_ERROR_DETAIL_LENGTH:
+        return details
+    return f"{details[:MAX_ERROR_DETAIL_LENGTH - 3]}..."

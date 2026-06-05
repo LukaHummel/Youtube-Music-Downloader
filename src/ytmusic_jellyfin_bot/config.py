@@ -79,6 +79,7 @@ class AppConfig:
     ytdlp_cookies_file: Path
     worker_concurrency: int
     log_level: str
+    external_log_level: str
     project_root: Path
     config_template_dir: Path | None = None
     telegram_connect_timeout: float = 30.0
@@ -108,6 +109,7 @@ class AppConfig:
             ).resolve(),
             worker_concurrency=int(os.environ.get("WORKER_CONCURRENCY", "1")),
             log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+            external_log_level=os.environ.get("EXTERNAL_LOG_LEVEL", "WARNING").upper(),
             project_root=project_root,
             config_template_dir=_resolve_config_template_dir(project_root),
             telegram_connect_timeout=_getenv_float("TELEGRAM_CONNECT_TIMEOUT", 30.0),

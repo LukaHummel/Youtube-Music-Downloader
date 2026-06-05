@@ -89,6 +89,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.telegram_pool_timeout, 30.0)
             self.assertEqual(config.telegram_poll_timeout, 10)
             self.assertEqual(config.telegram_bootstrap_retries, -1)
+            self.assertEqual(config.log_level, "INFO")
+            self.assertEqual(config.external_log_level, "WARNING")
             self.assertIn(
                 f"directory: {music_dir.resolve().as_posix()}",
                 config.runtime_beets_config_path.read_text(encoding="utf-8"),
@@ -116,6 +118,8 @@ class ConfigTests(unittest.TestCase):
                 "TELEGRAM_POOL_TIMEOUT": "62",
                 "TELEGRAM_POLL_TIMEOUT": "20",
                 "TELEGRAM_BOOTSTRAP_RETRIES": "5",
+                "LOG_LEVEL": "debug",
+                "EXTERNAL_LOG_LEVEL": "error",
             }
             with mock.patch.dict(os.environ, env, clear=True):
                 config = AppConfig.from_env()
@@ -126,6 +130,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.telegram_pool_timeout, 62.0)
             self.assertEqual(config.telegram_poll_timeout, 20)
             self.assertEqual(config.telegram_bootstrap_retries, 5)
+            self.assertEqual(config.log_level, "DEBUG")
+            self.assertEqual(config.external_log_level, "ERROR")
 
 
 if __name__ == "__main__":
