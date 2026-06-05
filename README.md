@@ -34,6 +34,7 @@ Optional environment variables:
 - `TELEGRAM_BOOTSTRAP_RETRIES` controls startup retries. It defaults to `-1`, which retries indefinitely after Telegram network errors.
 - `LOG_LEVEL` controls this app's logs. It defaults to `INFO`.
 - `EXTERNAL_LOG_LEVEL` controls noisy dependency logs from Telegram/httpx. It defaults to `WARNING`.
+- `COLOR_LOGS` controls ANSI-colored severity tags in container logs. It defaults to `true`.
 
 ## Local Run
 

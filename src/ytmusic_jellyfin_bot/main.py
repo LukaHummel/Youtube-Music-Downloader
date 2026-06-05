@@ -13,7 +13,26 @@ from .worker import JobWorker
 from .ytdlp_runner import YtDlpRunner
 
 EXTERNAL_LOGGERS = ("telegram", "httpx", "httpcore")
-LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+PLAIN_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+COLOR_LOG_FORMAT = "%(asctime)s %(colored_level)s %(name)s: %(message)s"
+RESET = "\033[0m"
+LEVEL_COLORS = {
+    logging.DEBUG: "\033[35m",
+    logging.INFO: "\033[36m",
+    logging.WARNING: "\033[33m",
+    logging.ERROR: "\033[31m",
+    logging.CRITICAL: "\033[1;31m",
+}
+
+
+class ColorLogFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        color = LEVEL_COLORS.get(record.levelno, "")
+        record.colored_level = f"{color}[{record.levelname}]{RESET}" if color else f"[{record.levelname}]"
+        try:
+            return super().format(record)
+        finally:
+            del record.colored_level
 
 
 def main() -> None:
@@ -58,10 +77,17 @@ def main() -> None:
 def _configure_logging(config: AppConfig) -> None:
     app_level = _parse_log_level(config.log_level, logging.INFO)
     external_level = _parse_log_level(config.external_log_level, logging.WARNING)
-    logging.basicConfig(
-        level=logging.WARNING,
-        format=LOG_FORMAT,
-    )
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    root_logger.setLevel(logging.WARNING)
+
+    handler = logging.StreamHandler()
+    if config.color_logs:
+        handler.setFormatter(ColorLogFormatter(COLOR_LOG_FORMAT))
+    else:
+        handler.setFormatter(logging.Formatter(PLAIN_LOG_FORMAT))
+    root_logger.addHandler(handler)
+
     logging.getLogger("ytmusic_jellyfin_bot").setLevel(app_level)
     for logger_name in EXTERNAL_LOGGERS:
         logging.getLogger(logger_name).setLevel(external_level)

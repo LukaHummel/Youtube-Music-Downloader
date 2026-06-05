@@ -91,6 +91,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.telegram_bootstrap_retries, -1)
             self.assertEqual(config.log_level, "INFO")
             self.assertEqual(config.external_log_level, "WARNING")
+            self.assertTrue(config.color_logs)
             self.assertIn(
                 f"directory: {music_dir.resolve().as_posix()}",
                 config.runtime_beets_config_path.read_text(encoding="utf-8"),
@@ -120,6 +121,7 @@ class ConfigTests(unittest.TestCase):
                 "TELEGRAM_BOOTSTRAP_RETRIES": "5",
                 "LOG_LEVEL": "debug",
                 "EXTERNAL_LOG_LEVEL": "error",
+                "COLOR_LOGS": "false",
             }
             with mock.patch.dict(os.environ, env, clear=True):
                 config = AppConfig.from_env()
@@ -132,6 +134,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.telegram_bootstrap_retries, 5)
             self.assertEqual(config.log_level, "DEBUG")
             self.assertEqual(config.external_log_level, "ERROR")
+            self.assertFalse(config.color_logs)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,8 @@ ProgressCallback = Callable[[float | None, int | None, str | None], Awaitable[No
 
 LOGGER = logging.getLogger(__name__)
 
+YOUTUBE_EXTRACTOR_ARGS = "youtube:player_client=web_music"
+DEFAULT_FORMAT_SELECTOR = "ba/b"
 AUTH_ERROR_MARKERS = (
     "private video",
     "private playlist",
@@ -42,7 +44,7 @@ class YtDlpRunner:
 
     async def preflight(self, url: str, request_kind: RequestKind) -> PreflightResult:
         stdout, stderr, returncode = await self._run_capture(
-            [*self._base_command(), "--dump-single-json", "--skip-download", "--no-warnings", url]
+            [*self._preflight_command(), "--dump-single-json", "--skip-download", "--no-warnings", url]
         )
         if returncode != 0:
             output = stderr or stdout
@@ -97,6 +99,8 @@ class YtDlpRunner:
         item_dir.mkdir(parents=True, exist_ok=True)
         command = [
             *self._base_command(),
+            "--format",
+            DEFAULT_FORMAT_SELECTOR,
             "--download-archive",
             str(self.config.ytdlp_archive_path),
             "--newline",
@@ -164,6 +168,12 @@ class YtDlpRunner:
 
     def _base_command(self) -> list[str]:
         command = ["yt-dlp", "--config-locations", str(self.config.runtime_ytdlp_config_path)]
+        if self.config.cookies_available:
+            command.extend(["--cookies", str(self.config.ytdlp_cookies_file)])
+        return command
+
+    def _preflight_command(self) -> list[str]:
+        command = ["yt-dlp", "--ignore-config", "--extractor-args", YOUTUBE_EXTRACTOR_ARGS]
         if self.config.cookies_available:
             command.extend(["--cookies", str(self.config.ytdlp_cookies_file)])
         return command

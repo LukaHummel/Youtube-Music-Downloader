@@ -44,6 +44,10 @@ class YtDlpRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.items), 1)
         self.assertEqual(result.items[0].youtube_video_id, "ADUis5-M15Y")
         self.assertEqual(result.items[0].artist, "Niza")
+        self.assertIsNotNone(runner.command)
+        assert runner.command is not None
+        self.assertIn("--ignore-config", runner.command)
+        self.assertNotIn("--config-locations", runner.command)
 
     async def test_preflight_auth_failure_preserves_ytdlp_output(self) -> None:
         output = "ERROR: [youtube] ADUis5-M15Y: Sign in to confirm you're not a bot. Use --cookies."

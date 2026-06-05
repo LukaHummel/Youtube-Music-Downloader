@@ -34,6 +34,17 @@ def _getenv_int(name: str, default: int) -> int:
     return int(raw_value)
 
 
+def _getenv_bool(name: str, default: bool) -> bool:
+    raw_value = os.environ.get(name, "").strip().lower()
+    if not raw_value:
+        return default
+    if raw_value in {"1", "true", "yes", "on"}:
+        return True
+    if raw_value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value")
+
+
 def _has_config_templates(directory: Path) -> bool:
     return all((directory / filename).is_file() for filename in CONFIG_TEMPLATE_FILENAMES)
 
@@ -80,6 +91,7 @@ class AppConfig:
     worker_concurrency: int
     log_level: str
     external_log_level: str
+    color_logs: bool
     project_root: Path
     config_template_dir: Path | None = None
     telegram_connect_timeout: float = 30.0
@@ -110,6 +122,7 @@ class AppConfig:
             worker_concurrency=int(os.environ.get("WORKER_CONCURRENCY", "1")),
             log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
             external_log_level=os.environ.get("EXTERNAL_LOG_LEVEL", "WARNING").upper(),
+            color_logs=_getenv_bool("COLOR_LOGS", True),
             project_root=project_root,
             config_template_dir=_resolve_config_template_dir(project_root),
             telegram_connect_timeout=_getenv_float("TELEGRAM_CONNECT_TIMEOUT", 30.0),
