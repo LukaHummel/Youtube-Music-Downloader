@@ -83,6 +83,12 @@ class ConfigTests(unittest.TestCase):
             config.prepare_runtime()
 
             self.assertEqual(config.config_template_dir, config_dir.resolve())
+            self.assertEqual(config.telegram_connect_timeout, 30.0)
+            self.assertEqual(config.telegram_read_timeout, 30.0)
+            self.assertEqual(config.telegram_write_timeout, 30.0)
+            self.assertEqual(config.telegram_pool_timeout, 30.0)
+            self.assertEqual(config.telegram_poll_timeout, 10)
+            self.assertEqual(config.telegram_bootstrap_retries, -1)
             self.assertIn(
                 f"directory: {music_dir.resolve().as_posix()}",
                 config.runtime_beets_config_path.read_text(encoding="utf-8"),
@@ -91,6 +97,35 @@ class ConfigTests(unittest.TestCase):
                 staging_dir.resolve().as_posix(),
                 config.runtime_ytdlp_config_path.read_text(encoding="utf-8"),
             )
+
+    def test_from_env_uses_telegram_network_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            temp_path = Path(tempdir)
+            config_dir = temp_path / "templates"
+            config_dir.mkdir()
+            (config_dir / "beets.yaml").write_text("directory: /music\n", encoding="utf-8")
+            (config_dir / "yt-dlp.conf").write_text("-x\n", encoding="utf-8")
+
+            env = {
+                "TELEGRAM_BOT_TOKEN": "123456:telegram-token",
+                "ALLOWED_TELEGRAM_IDS": "123456789",
+                "CONFIG_TEMPLATE_DIR": str(config_dir),
+                "TELEGRAM_CONNECT_TIMEOUT": "45.5",
+                "TELEGRAM_READ_TIMEOUT": "60",
+                "TELEGRAM_WRITE_TIMEOUT": "61",
+                "TELEGRAM_POOL_TIMEOUT": "62",
+                "TELEGRAM_POLL_TIMEOUT": "20",
+                "TELEGRAM_BOOTSTRAP_RETRIES": "5",
+            }
+            with mock.patch.dict(os.environ, env, clear=True):
+                config = AppConfig.from_env()
+
+            self.assertEqual(config.telegram_connect_timeout, 45.5)
+            self.assertEqual(config.telegram_read_timeout, 60.0)
+            self.assertEqual(config.telegram_write_timeout, 61.0)
+            self.assertEqual(config.telegram_pool_timeout, 62.0)
+            self.assertEqual(config.telegram_poll_timeout, 20)
+            self.assertEqual(config.telegram_bootstrap_retries, 5)
 
 
 if __name__ == "__main__":

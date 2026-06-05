@@ -30,7 +30,11 @@ def main() -> None:
     )
     bot = TelegramBotService(config=config, db=db, worker=worker)
     application = bot.build()
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        timeout=config.telegram_poll_timeout,
+        bootstrap_retries=config.telegram_bootstrap_retries,
+    )
 
 
 if __name__ == "__main__":
