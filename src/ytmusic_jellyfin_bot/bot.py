@@ -37,6 +37,7 @@ class TelegramBotService:
             .post_shutdown(self._post_shutdown)
             .build()
         )
+        application.add_handler(CommandHandler("start", self.help_command))
         application.add_handler(CommandHandler("help", self.help_command))
         application.add_handler(CommandHandler("track", self.track_command))
         application.add_handler(CommandHandler("playlist", self.playlist_command))

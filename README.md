@@ -77,6 +77,7 @@ The app already defaults to `/music`, `/downloads`, `/data`, and `/run/secrets/y
 ## Bot Commands
 
 - `/help`
+- `/start`
 - `/track <url>`
 - `/playlist <url>`
 - `/status`
