@@ -4,6 +4,9 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+CONFIG_TEMPLATE_DIR_ENV = "CONFIG_TEMPLATE_DIR"
+CONFIG_TEMPLATE_FILENAMES = ("beets.yaml", "yt-dlp.conf")
+
 
 def _parse_allowed_ids(raw_value: str) -> frozenset[int]:
     ids: set[int] = set()
@@ -12,6 +15,39 @@ def _parse_allowed_ids(raw_value: str) -> frozenset[int]:
         if value:
             ids.add(int(value))
     return frozenset(ids)
+
+
+def _has_config_templates(directory: Path) -> bool:
+    return all((directory / filename).is_file() for filename in CONFIG_TEMPLATE_FILENAMES)
+
+
+def _resolve_config_template_dir(project_root: Path, cwd: Path | None = None) -> Path:
+    configured = os.environ.get(CONFIG_TEMPLATE_DIR_ENV, "").strip()
+    if configured:
+        directory = Path(configured).expanduser().resolve()
+        if _has_config_templates(directory):
+            return directory
+        expected = ", ".join(CONFIG_TEMPLATE_FILENAMES)
+        raise FileNotFoundError(
+            f"{CONFIG_TEMPLATE_DIR_ENV} must point to a directory containing {expected}: {directory}"
+        )
+
+    current_dir = cwd or Path.cwd()
+    candidates = (
+        project_root / "config",
+        current_dir / "config",
+        Path("/app/config"),
+    )
+    for directory in candidates:
+        if _has_config_templates(directory):
+            return directory.resolve()
+
+    expected = ", ".join(CONFIG_TEMPLATE_FILENAMES)
+    searched = ", ".join(str(directory.resolve()) for directory in candidates)
+    raise FileNotFoundError(
+        f"Could not find config templates ({expected}). "
+        f"Set {CONFIG_TEMPLATE_DIR_ENV} to the template directory. Searched: {searched}"
+    )
 
 
 @dataclass(slots=True)
@@ -25,6 +61,7 @@ class AppConfig:
     worker_concurrency: int
     log_level: str
     project_root: Path
+    config_template_dir: Path | None = None
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -47,6 +84,7 @@ class AppConfig:
             worker_concurrency=int(os.environ.get("WORKER_CONCURRENCY", "1")),
             log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
             project_root=project_root,
+            config_template_dir=_resolve_config_template_dir(project_root),
         )
 
     @property
@@ -75,11 +113,15 @@ class AppConfig:
 
     @property
     def template_beets_config_path(self) -> Path:
-        return self.project_root / "config" / "beets.yaml"
+        return self.template_config_dir / "beets.yaml"
 
     @property
     def template_ytdlp_config_path(self) -> Path:
-        return self.project_root / "config" / "yt-dlp.conf"
+        return self.template_config_dir / "yt-dlp.conf"
+
+    @property
+    def template_config_dir(self) -> Path:
+        return self.config_template_dir or self.project_root / "config"
 
     @property
     def runtime_beets_config_path(self) -> Path:

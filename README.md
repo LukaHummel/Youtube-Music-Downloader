@@ -26,6 +26,10 @@ Required environment variables:
 
 See [`.env.example`](./.env.example) and [`docker-compose.example.yml`](./docker-compose.example.yml).
 
+Optional environment variables:
+
+- `CONFIG_TEMPLATE_DIR` for the directory containing `beets.yaml` and `yt-dlp.conf`. The Docker image sets this to `/app/config`.
+
 ## Local Run
 
 ```powershell
