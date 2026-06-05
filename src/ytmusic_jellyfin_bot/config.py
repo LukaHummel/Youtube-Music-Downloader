@@ -33,10 +33,12 @@ def _resolve_config_template_dir(project_root: Path, cwd: Path | None = None) ->
         )
 
     current_dir = cwd or Path.cwd()
+    package_dir = Path(__file__).resolve().parent
     candidates = (
         project_root / "config",
         current_dir / "config",
         Path("/app/config"),
+        package_dir / "config",
     )
     for directory in candidates:
         if _has_config_templates(directory):
@@ -121,7 +123,7 @@ class AppConfig:
 
     @property
     def template_config_dir(self) -> Path:
-        return self.config_template_dir or self.project_root / "config"
+        return self.config_template_dir or _resolve_config_template_dir(self.project_root)
 
     @property
     def runtime_beets_config_path(self) -> Path:

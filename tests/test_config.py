@@ -7,6 +7,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import ytmusic_jellyfin_bot.config as config_module
 from ytmusic_jellyfin_bot.config import AppConfig, _resolve_config_template_dir
 
 
@@ -25,6 +26,30 @@ class ConfigTests(unittest.TestCase):
                 resolved = _resolve_config_template_dir(installed_project_root, cwd=app_dir)
 
             self.assertEqual(resolved, config_dir.resolve())
+
+    def test_resolves_bundled_templates_as_installed_package_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            temp_path = Path(tempdir)
+            installed_project_root = temp_path / "usr" / "local" / "lib" / "python3.12"
+            unrelated_cwd = temp_path / "workspace"
+            unrelated_cwd.mkdir()
+
+            with mock.patch.dict(os.environ, {}, clear=True):
+                resolved = _resolve_config_template_dir(installed_project_root, cwd=unrelated_cwd)
+
+            expected = Path(config_module.__file__).resolve().parent / "config"
+            self.assertEqual(resolved, expected.resolve())
+
+    def test_bundled_templates_match_root_templates(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        package_config_dir = Path(config_module.__file__).resolve().parent / "config"
+
+        for filename in ("beets.yaml", "yt-dlp.conf"):
+            with self.subTest(filename=filename):
+                self.assertEqual(
+                    (repo_root / "config" / filename).read_text(encoding="utf-8"),
+                    (package_config_dir / filename).read_text(encoding="utf-8"),
+                )
 
     def test_from_env_uses_config_template_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
