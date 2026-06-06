@@ -7,7 +7,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from ytmusic_jellyfin_bot.models import RequestKind
-from ytmusic_jellyfin_bot.ytdlp_runner import YtDlpError, YtDlpRunner
+from ytmusic_jellyfin_bot.ytdlp_runner import DEFAULT_FORMAT_SELECTOR, YtDlpError, YtDlpRunner
 
 
 class FakeYtDlpRunner(YtDlpRunner):
@@ -48,6 +48,7 @@ class YtDlpRunnerTests(unittest.IsolatedAsyncioTestCase):
         assert runner.command is not None
         self.assertIn("--ignore-config", runner.command)
         self.assertNotIn("--config-locations", runner.command)
+        self.assertEqual(runner.command[runner.command.index("--format") + 1], DEFAULT_FORMAT_SELECTOR)
 
     async def test_preflight_auth_failure_preserves_ytdlp_output(self) -> None:
         output = "ERROR: [youtube] ADUis5-M15Y: Sign in to confirm you're not a bot. Use --cookies."

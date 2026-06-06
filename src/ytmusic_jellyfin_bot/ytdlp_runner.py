@@ -43,9 +43,9 @@ class YtDlpRunner:
         self.config = config
 
     async def preflight(self, url: str, request_kind: RequestKind) -> PreflightResult:
-        stdout, stderr, returncode = await self._run_capture(
-            [*self._preflight_command(), "--dump-single-json", "--skip-download", "--no-warnings", url]
-        )
+        command = [*self._preflight_command(), "--dump-single-json", "--skip-download", "--no-warnings", url]
+        LOGGER.info("Running yt-dlp preflight command: %s", _format_command(command))
+        stdout, stderr, returncode = await self._run_capture(command)
         if returncode != 0:
             output = stderr or stdout
             raise YtDlpError(
@@ -173,7 +173,14 @@ class YtDlpRunner:
         return command
 
     def _preflight_command(self) -> list[str]:
-        command = ["yt-dlp", "--ignore-config", "--extractor-args", YOUTUBE_EXTRACTOR_ARGS]
+        command = [
+            "yt-dlp",
+            "--ignore-config",
+            "--extractor-args",
+            YOUTUBE_EXTRACTOR_ARGS,
+            "--format",
+            DEFAULT_FORMAT_SELECTOR,
+        ]
         if self.config.cookies_available:
             command.extend(["--cookies", str(self.config.ytdlp_cookies_file)])
         return command

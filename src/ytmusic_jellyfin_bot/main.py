@@ -52,8 +52,9 @@ def main() -> None:
         "available" if config.cookies_available else "not available",
     )
     logging.getLogger(__name__).info(
-        "yt-dlp runtime config=%s download_format=%s preflight_config=ignored",
+        "yt-dlp runtime config=%s config_format=%s enforced_format=%s preflight_config=ignored",
         config.runtime_ytdlp_config_path,
+        _find_config_format(config.runtime_ytdlp_config_path),
         DEFAULT_FORMAT_SELECTOR,
     )
     if not config.cookies_available:
@@ -101,6 +102,17 @@ def _configure_logging(config: AppConfig) -> None:
 def _parse_log_level(value: str, default: int) -> int:
     level = getattr(logging, value.upper(), None)
     return level if isinstance(level, int) else default
+
+
+def _find_config_format(config_path) -> str:
+    try:
+        lines = config_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return "unreadable"
+    for index, line in enumerate(lines):
+        if line.strip() in {"-f", "--format"} and index + 1 < len(lines):
+            return lines[index + 1].strip()
+    return "not set"
 
 
 if __name__ == "__main__":
