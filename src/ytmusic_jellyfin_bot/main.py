@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import logging
+import platform
+import sys
+from importlib.metadata import PackageNotFoundError, version as package_version
 
 from telegram import Update
 
+from . import __version__
 from .beets_runner import BeetsRunner
 from .bot import TelegramBotService
 from .config import AppConfig
@@ -12,6 +16,7 @@ from .playlist_writer import PlaylistWriter
 from .worker import JobWorker
 from .ytdlp_runner import DEFAULT_FORMAT_SELECTOR, YtDlpRunner
 
+DEPENDENCY_VERSION_PACKAGES = ("yt-dlp", "beets", "python-telegram-bot")
 EXTERNAL_LOGGERS = ("telegram", "httpx", "httpcore")
 PLAIN_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 COLOR_LOG_FORMAT = "%(asctime)s %(colored_level)s %(name)s: %(message)s"
@@ -39,26 +44,42 @@ def main() -> None:
     config = AppConfig.from_env()
     config.prepare_runtime()
     _configure_logging(config)
-    logging.getLogger(__name__).info(
-        "Starting YouTube Music downloader bot with app log level %s and external log level %s",
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "Starting YouTube Music downloader bot version=%s python=%s platform=%s "
+        "app_log_level=%s external_log_level=%s color_logs=%s",
+        __version__,
+        _python_version(),
+        platform.platform(),
         config.log_level,
         config.external_log_level,
+        config.color_logs,
     )
-    logging.getLogger(__name__).info(
+    logger.info(
+        "Runtime configuration: worker_concurrency=%s telegram_poll_timeout=%ss "
+        "telegram_bootstrap_retries=%s db=%s config_templates=%s",
+        config.worker_concurrency,
+        config.telegram_poll_timeout,
+        config.telegram_bootstrap_retries,
+        config.db_path,
+        config.template_config_dir,
+    )
+    logger.info("Dependency versions: %s", _dependency_versions())
+    logger.info(
         "Runtime paths: music=%s staging=%s state=%s cookies=%s",
         config.music_library_dir,
         config.staging_dir,
         config.app_state_dir,
         "available" if config.cookies_available else "not available",
     )
-    logging.getLogger(__name__).info(
-        "yt-dlp runtime config=%s config_format=%s enforced_format=%s preflight_config=ignored preflight_formats=ignored",
+    logger.info(
+        "yt-dlp runtime config=%s config_format=%s enforced_format=%s youtube_clients=default preflight_config=ignored preflight_formats=ignored",
         config.runtime_ytdlp_config_path,
         _find_config_format(config.runtime_ytdlp_config_path),
         DEFAULT_FORMAT_SELECTOR,
     )
     if not config.cookies_available:
-        logging.getLogger(__name__).warning(
+        logger.warning(
             "Cookies file is not mounted or readable at %s; private, age-restricted, and bot-check gated "
             "YouTube requests may fail",
             config.ytdlp_cookies_file,
@@ -102,6 +123,21 @@ def _configure_logging(config: AppConfig) -> None:
 def _parse_log_level(value: str, default: int) -> int:
     level = getattr(logging, value.upper(), None)
     return level if isinstance(level, int) else default
+
+
+def _python_version() -> str:
+    return ".".join(str(part) for part in sys.version_info[:3])
+
+
+def _dependency_versions() -> str:
+    versions: list[str] = []
+    for package_name in DEPENDENCY_VERSION_PACKAGES:
+        try:
+            installed_version = package_version(package_name)
+        except PackageNotFoundError:
+            installed_version = "not installed"
+        versions.append(f"{package_name}={installed_version}")
+    return " ".join(versions)
 
 
 def _find_config_format(config_path) -> str:
