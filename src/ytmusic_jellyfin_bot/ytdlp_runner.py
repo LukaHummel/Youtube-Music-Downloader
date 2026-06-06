@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from .config import AppConfig, DEFAULT_YOUTUBE_PLAYER_CLIENTS
+from .metadata import normalize_track_metadata
 from .models import DownloadResult, PreflightItem, PreflightResult, RequestKind
 
 ProgressCallback = Callable[[float | None, int | None, str | None], Awaitable[None]]
@@ -363,6 +364,7 @@ class YtDlpRunner:
 
     @staticmethod
     def _build_item_from_entry(entry: dict[str, Any], index: int, playlist_id: str | None) -> PreflightItem:
+        metadata = normalize_track_metadata(entry)
         video_id = entry["id"]
         normalized_url = f"https://music.youtube.com/watch?v={video_id}"
         return PreflightItem(
@@ -371,10 +373,10 @@ class YtDlpRunner:
             normalized_url=normalized_url,
             youtube_video_id=video_id,
             playlist_item_id=f"{playlist_id}:{index}" if playlist_id else None,
-            title=entry.get("track") or entry.get("title"),
-            artist=_coalesce_artist(entry),
-            album=entry.get("album"),
-            metadata=entry,
+            title=metadata.get("track") or metadata.get("title"),
+            artist=metadata.get("artist") or _coalesce_artist(entry),
+            album=metadata.get("album"),
+            metadata=metadata,
         )
 
     @staticmethod

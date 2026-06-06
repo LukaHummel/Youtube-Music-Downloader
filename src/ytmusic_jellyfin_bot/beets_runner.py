@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import shlex
 import sqlite3
 from pathlib import Path
 from typing import Any
 
+from mediafile import FileTypeError, MediaFile, MutagenError, UnreadableFileError
+
 from .config import AppConfig
+from .metadata import normalize_track_metadata, tag_values_from_metadata
 from .models import ImportResult
+
+LOGGER = logging.getLogger(__name__)
 
 
 class BeetsError(RuntimeError):
@@ -18,8 +25,10 @@ class BeetsRunner:
         self.config = config
 
     async def import_track(self, audio_path: Path, metadata: dict[str, Any]) -> ImportResult:
+        normalized_metadata = normalize_track_metadata(metadata)
+        self.write_baseline_tags(audio_path, normalized_metadata, overwrite=True)
         max_id_before = self._get_max_item_id()
-        process = await asyncio.create_subprocess_exec(
+        command = [
             "beet",
             "-c",
             str(self.config.runtime_beets_config_path),
@@ -27,26 +36,66 @@ class BeetsRunner:
             "-s",
             "-q",
             str(audio_path),
+        ]
+        LOGGER.info("Running beets import command: %s", _format_command(command))
+        process = await asyncio.create_subprocess_exec(
+            *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout_bytes, stderr_bytes = await process.communicate()
+        stdout = stdout_bytes.decode("utf-8", errors="replace").strip()
+        stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
+        _log_beets_output(stdout=stdout, stderr=stderr, returncode=process.returncode)
         if process.returncode != 0:
-            error = stderr_bytes.decode("utf-8", errors="replace").strip() or stdout_bytes.decode(
-                "utf-8", errors="replace"
-            ).strip()
+            error = stderr or stdout
             raise BeetsError(error or "beet import failed without an error message.")
 
         imported_path = self._find_newly_imported_path(max_id_before)
         if imported_path:
             return ImportResult(status="imported", final_path=imported_path)
 
-        duplicate_path, reason = self.find_existing_path(metadata)
+        duplicate_path, reason = self.find_existing_path(normalized_metadata)
         if duplicate_path:
             return ImportResult(status="duplicate", final_path=duplicate_path, reason=reason)
         if reason == "ambiguous":
             return ImportResult(status="duplicate_ambiguous", reason=reason)
         return ImportResult(status="missing", reason="Imported file could not be resolved in beets.")
+
+    def write_baseline_tags(self, audio_path: Path, metadata: dict[str, Any], *, overwrite: bool) -> None:
+        values = tag_values_from_metadata(metadata)
+        if not values:
+            LOGGER.warning("No fallback metadata was available before beets import: path=%s", audio_path)
+            return
+        try:
+            media = MediaFile(audio_path)
+            changed_fields: list[str] = []
+            for field, value in values.items():
+                current_value = getattr(media, field, None)
+                if overwrite or _missing_tag_value(current_value):
+                    setattr(media, field, value)
+                    changed_fields.append(field)
+            if not changed_fields:
+                LOGGER.info(
+                    "Fallback metadata already present: path=%s candidate_fields=%s",
+                    audio_path,
+                    ",".join(sorted(values)),
+                )
+                return
+            media.save()
+        except (FileTypeError, MutagenError, UnreadableFileError) as exc:
+            LOGGER.warning(
+                "Could not write fallback metadata before beets import: path=%s error=%s",
+                audio_path,
+                exc,
+            )
+            return
+        LOGGER.info(
+            "Wrote fallback metadata: path=%s overwrite=%s fields=%s",
+            audio_path,
+            overwrite,
+            ",".join(sorted(changed_fields)),
+        )
 
     def find_existing_path(self, metadata: dict[str, Any]) -> tuple[Path | None, str | None]:
         mb_trackid = metadata.get("mb_trackid") or metadata.get("mb_releasetrackid")
@@ -116,3 +165,31 @@ def _path_from_value(value: Any) -> Path:
     if isinstance(value, bytes):
         return Path(value.decode("utf-8", errors="replace"))
     return Path(str(value))
+
+
+def _missing_tag_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (int, float)):
+        return value <= 0
+    if isinstance(value, (list, tuple, set)):
+        return not value
+    return False
+
+
+def _format_command(command: list[str]) -> str:
+    return " ".join(shlex.quote(piece) for piece in command)
+
+
+def _log_beets_output(*, stdout: str, stderr: str, returncode: int | None) -> None:
+    output = stderr or stdout
+    if not output:
+        LOGGER.info("beets import finished returncode=%s with no console output", returncode)
+        return
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    summary = " | ".join(lines[-8:])
+    if len(summary) > 1200:
+        summary = f"{summary[:1197]}..."
+    LOGGER.info("beets import finished returncode=%s output=%s", returncode, summary)

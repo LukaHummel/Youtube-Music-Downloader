@@ -60,7 +60,8 @@ class YtDlpRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.source_id, "ADUis5-M15Y")
         self.assertEqual(len(result.items), 1)
         self.assertEqual(result.items[0].youtube_video_id, "ADUis5-M15Y")
-        self.assertEqual(result.items[0].artist, "Niza")
+        self.assertEqual(result.items[0].title, "ACELERADA")
+        self.assertEqual(result.items[0].artist, "sma$her & MXZI")
         self.assertIsNotNone(runner.command)
         assert runner.command is not None
         self.assertIn("--ignore-config", runner.command)

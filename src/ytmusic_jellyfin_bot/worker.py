@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable
 from .beets_runner import BeetsError, BeetsRunner
 from .config import AppConfig
 from .db import Database
+from .metadata import normalize_track_metadata
 from .models import ItemStatus, JobItemRecord, JobRecord, JobStatus, RequestKind
 from .playlist_writer import PlaylistWriter
 from .ytdlp_runner import YtDlpError, YtDlpRunner
@@ -171,6 +172,7 @@ class JobWorker:
             if mapping and Path(mapping["final_path"]).exists():
                 duplicate_count += 1
                 final_path = Path(mapping["final_path"])
+                self.beets.write_baseline_tags(final_path, self._load_metadata(item, None), overwrite=False)
                 LOGGER.info(
                     "Job #%s item %s skipped existing file: video_id=%s path=%s",
                     job.id,
@@ -385,10 +387,10 @@ class JobWorker:
                 info_metadata = json.loads(info_json_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 LOGGER.warning("Ignoring invalid info.json for job_item_id=%s path=%s", item.id, info_json_path)
-                return metadata
+                return normalize_track_metadata(metadata)
             info_metadata.update({key: value for key, value in metadata.items() if value})
-            return info_metadata
-        return metadata
+            return normalize_track_metadata(info_metadata)
+        return normalize_track_metadata(metadata)
 
     def _cancel_remaining_items(self, job_id: int) -> None:
         for item in self.db.get_job_items(job_id):
