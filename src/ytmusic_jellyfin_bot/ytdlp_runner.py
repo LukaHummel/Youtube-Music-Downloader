@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import shlex
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -29,11 +30,17 @@ AUTH_ERROR_MARKERS = (
 )
 PROGRESS_RE = re.compile(r"^download:(?P<percent>[^|]*)\|(?P<speed>[^|]*)\|(?P<eta>[^|]*)\|")
 AUDIO_SUFFIXES = {".aac", ".m4a", ".mp3", ".opus", ".flac", ".wav", ".ogg", ".alac"}
-FORMAT_UNAVAILABLE_MARKERS = (
-    "requested format is not available",
-    "no video formats found",
-    "no formats found",
-)
+
+
+@dataclass(frozen=True, slots=True)
+class FormatSelection:
+    format_id: str
+    player_client: str | None
+    ext: str | None
+    acodec: str | None
+    vcodec: str | None
+    abr: float | None
+    tbr: float | None
 
 
 class YtDlpError(RuntimeError):
@@ -116,41 +123,44 @@ class YtDlpRunner:
     ) -> DownloadResult:
         item_dir = self.config.staging_dir / str(job_id) / f"{item_index:04d}"
         item_dir.mkdir(parents=True, exist_ok=True)
-        collected: list[str] = []
-        for player_client in DOWNLOAD_PLAYER_CLIENTS:
-            command = self._download_command(item_dir=item_dir, url=url, player_client=player_client)
-            LOGGER.info(
-                "Running yt-dlp download command for job_id=%s item_index=%s player_client=%s: %s",
-                job_id,
-                item_index,
-                player_client or "default",
-                _format_command(command),
-            )
-            returncode, collected = await self._run_download_process(
-                command=command,
-                job_id=job_id,
-                item_index=item_index,
-                progress_callback=progress_callback,
-            )
-            output = "\n".join(collected)
-            if returncode == 0:
-                break
-            if _contains_format_unavailable_marker(output) and player_client is not DOWNLOAD_PLAYER_CLIENTS[-1]:
-                LOGGER.warning(
-                    "yt-dlp reported no usable format for job_id=%s item_index=%s player_client=%s; "
-                    "trying next YouTube client",
-                    job_id,
-                    item_index,
-                    player_client or "default",
-                )
-                continue
+        selection = await self._resolve_download_format(url)
+        LOGGER.info(
+            "Selected yt-dlp format for job_id=%s item_index=%s player_client=%s format_id=%s ext=%s "
+            "acodec=%s vcodec=%s abr=%s tbr=%s",
+            job_id,
+            item_index,
+            selection.player_client or "default",
+            selection.format_id,
+            selection.ext or "unknown",
+            selection.acodec or "unknown",
+            selection.vcodec or "unknown",
+            selection.abr if selection.abr is not None else "unknown",
+            selection.tbr if selection.tbr is not None else "unknown",
+        )
+        command = self._download_command(
+            item_dir=item_dir,
+            url=url,
+            selection=selection,
+        )
+        LOGGER.info(
+            "Running yt-dlp download command for job_id=%s item_index=%s: %s",
+            job_id,
+            item_index,
+            _format_command(command),
+        )
+        returncode, collected = await self._run_download_process(
+            command=command,
+            job_id=job_id,
+            item_index=item_index,
+            progress_callback=progress_callback,
+        )
+        output = "\n".join(collected)
+        if returncode != 0:
             raise YtDlpError(
                 self._format_error(output),
                 auth_required=_contains_auth_marker(output),
                 output=output,
             )
-        else:
-            raise YtDlpError("yt-dlp did not run a download attempt.")
 
         audio_candidates = sorted(
             (
@@ -168,14 +178,71 @@ class YtDlpRunner:
         info_json_path = next((path for path in item_dir.rglob("*.info.json") if path.is_file()), None)
         return DownloadResult(audio_path=audio_candidates[0], info_json_path=info_json_path)
 
-    def _download_command(self, *, item_dir: Path, url: str, player_client: str | None) -> list[str]:
-        command = [*self._base_command()]
+    async def _resolve_download_format(self, url: str) -> FormatSelection:
+        last_error: YtDlpError | None = None
+        for player_client in DOWNLOAD_PLAYER_CLIENTS:
+            command = self._format_probe_command(url=url, player_client=player_client)
+            LOGGER.info(
+                "Resolving yt-dlp formats player_client=%s: %s",
+                player_client or "default",
+                _format_command(command),
+            )
+            stdout, stderr, returncode = await self._run_capture(command)
+            if returncode != 0:
+                output = stderr or stdout
+                last_error = YtDlpError(
+                    self._format_error(output),
+                    auth_required=_contains_auth_marker(output),
+                    output=output,
+                )
+                LOGGER.warning(
+                    "yt-dlp format probe failed player_client=%s: %s",
+                    player_client or "default",
+                    str(last_error),
+                )
+                continue
+            try:
+                payload = json.loads(stdout.strip())
+            except json.JSONDecodeError as exc:
+                last_error = YtDlpError(
+                    "yt-dlp did not return valid JSON while resolving formats.",
+                    output=stderr or stdout,
+                )
+                raise last_error from exc
+
+            selection = _select_best_audio_format(payload.get("formats") or [], player_client)
+            if selection:
+                return selection
+            LOGGER.warning(
+                "yt-dlp format probe found no audio-capable formats for player_client=%s",
+                player_client or "default",
+            )
+
+        if last_error:
+            raise last_error
+        raise YtDlpError("yt-dlp did not find any audio-capable formats for this URL.")
+
+    def _format_probe_command(self, *, url: str, player_client: str | None) -> list[str]:
+        command = [
+            "yt-dlp",
+            "--ignore-config",
+            "--cookies",
+            str(self._require_cookies_file()),
+            "--ignore-no-formats-error",
+        ]
         if player_client:
             command.extend(["--extractor-args", f"youtube:player_client={player_client}"])
+        command.extend(["--dump-single-json", "--skip-download", "--no-warnings", url])
+        return command
+
+    def _download_command(self, *, item_dir: Path, url: str, selection: FormatSelection) -> list[str]:
+        command = [*self._base_command()]
+        if selection.player_client:
+            command.extend(["--extractor-args", f"youtube:player_client={selection.player_client}"])
         command.extend(
             [
                 "--format",
-                DEFAULT_FORMAT_SELECTOR,
+                selection.format_id,
                 "--download-archive",
                 str(self.config.ytdlp_archive_path),
                 "--newline",
@@ -330,10 +397,58 @@ def _contains_auth_marker(output: str) -> bool:
     return any(marker in lowered for marker in AUTH_ERROR_MARKERS)
 
 
-def _contains_format_unavailable_marker(output: str) -> bool:
-    lowered = output.lower()
-    return any(marker in lowered for marker in FORMAT_UNAVAILABLE_MARKERS)
-
-
 def _format_command(command: list[str]) -> str:
     return " ".join(shlex.quote(piece) for piece in command)
+
+
+def _select_best_audio_format(
+    formats: list[dict[str, Any]],
+    player_client: str | None,
+) -> FormatSelection | None:
+    candidates = [candidate for candidate in formats if _has_audio(candidate)]
+    if not candidates:
+        return None
+
+    audio_only = [candidate for candidate in candidates if candidate.get("vcodec") == "none"]
+    selected = max(audio_only or candidates, key=_format_sort_key)
+    format_id = selected.get("format_id")
+    if not format_id:
+        return None
+    return FormatSelection(
+        format_id=str(format_id),
+        player_client=player_client,
+        ext=_optional_str(selected.get("ext")),
+        acodec=_optional_str(selected.get("acodec")),
+        vcodec=_optional_str(selected.get("vcodec")),
+        abr=_optional_float(selected.get("abr")),
+        tbr=_optional_float(selected.get("tbr")),
+    )
+
+
+def _has_audio(candidate: dict[str, Any]) -> bool:
+    acodec = candidate.get("acodec")
+    return bool(acodec and acodec != "none")
+
+
+def _format_sort_key(candidate: dict[str, Any]) -> tuple[float, float, float, float]:
+    return (
+        _optional_float(candidate.get("abr")) or 0.0,
+        _optional_float(candidate.get("tbr")) or 0.0,
+        _optional_float(candidate.get("asr")) or 0.0,
+        _optional_float(candidate.get("filesize") or candidate.get("filesize_approx")) or 0.0,
+    )
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
