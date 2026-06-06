@@ -9,15 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from .config import AppConfig
+from .config import AppConfig, DEFAULT_YOUTUBE_PLAYER_CLIENTS
 from .models import DownloadResult, PreflightItem, PreflightResult, RequestKind
 
 ProgressCallback = Callable[[float | None, int | None, str | None], Awaitable[None]]
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_FORMAT_SELECTOR = "ba/bestaudio/best"
-DOWNLOAD_PLAYER_CLIENTS = (None, "android_vr", "web_embedded", "web", "mweb", "web_safari")
 AUTH_ERROR_MARKERS = (
     "private video",
     "private playlist",
@@ -59,7 +57,6 @@ class YtDlpRunner:
             *self._preflight_command(),
             "--dump-single-json",
             "--skip-download",
-            "--no-warnings",
             url,
         ]
         LOGGER.info("Running yt-dlp preflight command: %s", _format_command(command))
@@ -71,6 +68,7 @@ class YtDlpRunner:
                 auth_required=_contains_auth_marker(output),
                 output=output,
             )
+        _log_ytdlp_diagnostics("preflight", stderr)
         return self._parse_preflight_stdout(stdout, stderr, request_kind)
 
     def _parse_preflight_stdout(
@@ -180,7 +178,8 @@ class YtDlpRunner:
 
     async def _resolve_download_format(self, url: str) -> FormatSelection:
         last_error: YtDlpError | None = None
-        for player_client in DOWNLOAD_PLAYER_CLIENTS:
+        last_probe_output: str | None = None
+        for player_client in self._download_player_clients():
             command = self._format_probe_command(url=url, player_client=player_client)
             LOGGER.info(
                 "Resolving yt-dlp formats player_client=%s: %s",
@@ -212,15 +211,28 @@ class YtDlpRunner:
 
             selection = _select_best_audio_format(payload.get("formats") or [], player_client)
             if selection:
+                _log_ytdlp_diagnostics("format probe", stderr)
                 return selection
+            last_probe_output = _probe_failure_details(stderr=stderr, payload=payload, player_client=player_client)
             LOGGER.warning(
-                "yt-dlp format probe found no audio-capable formats for player_client=%s",
+                "yt-dlp format probe found no audio-capable formats for player_client=%s diagnostics=%s",
                 player_client or "default",
+                _summarize_output(last_probe_output),
             )
 
         if last_error:
             raise last_error
-        raise YtDlpError("yt-dlp did not find any audio-capable formats for this URL.")
+        raise YtDlpError(
+            "yt-dlp did not find any audio-capable formats for this URL with the mounted cookies file. "
+            "Check the logged yt-dlp diagnostics, refresh cookies, or configure a YouTube PO token if "
+            "YouTube is enforcing one for this session.",
+            auth_required=_contains_auth_marker(last_probe_output or ""),
+            output=last_probe_output,
+        )
+
+    def _download_player_clients(self) -> tuple[str | None, ...]:
+        raw_clients = getattr(self.config, "youtube_player_clients", DEFAULT_YOUTUBE_PLAYER_CLIENTS)
+        return tuple(None if client.lower() == "default" else client for client in raw_clients)
 
     def _format_probe_command(self, *, url: str, player_client: str | None) -> list[str]:
         command = [
@@ -230,15 +242,17 @@ class YtDlpRunner:
             str(self._require_cookies_file()),
             "--ignore-no-formats-error",
         ]
-        if player_client:
-            command.extend(["--extractor-args", f"youtube:player_client={player_client}"])
-        command.extend(["--dump-single-json", "--skip-download", "--no-warnings", url])
+        extractor_args = self._youtube_extractor_args(player_client)
+        if extractor_args:
+            command.extend(["--extractor-args", extractor_args])
+        command.extend(["--dump-single-json", "--skip-download", url])
         return command
 
     def _download_command(self, *, item_dir: Path, url: str, selection: FormatSelection) -> list[str]:
         command = [*self._base_command()]
-        if selection.player_client:
-            command.extend(["--extractor-args", f"youtube:player_client={selection.player_client}"])
+        extractor_args = self._youtube_extractor_args(selection.player_client)
+        if extractor_args:
+            command.extend(["--extractor-args", extractor_args])
         command.extend(
             [
                 "--format",
@@ -294,6 +308,18 @@ class YtDlpRunner:
         command = ["yt-dlp", "--config-locations", str(self.config.runtime_ytdlp_config_path)]
         command.extend(["--cookies", str(self._require_cookies_file())])
         return command
+
+    def _youtube_extractor_args(self, player_client: str | None) -> str | None:
+        pieces: list[str] = []
+        configured = getattr(self.config, "youtube_extractor_args", None)
+        configured_args = configured.removeprefix("youtube:") if configured else None
+        if player_client and not _has_configured_player_client(configured_args):
+            pieces.append(f"player_client={player_client}")
+        if configured:
+            pieces.append(configured_args or "")
+        if not pieces:
+            return None
+        return f"youtube:{';'.join(pieces)}"
 
     def _preflight_command(self) -> list[str]:
         command = [
@@ -398,7 +424,61 @@ def _contains_auth_marker(output: str) -> bool:
 
 
 def _format_command(command: list[str]) -> str:
-    return " ".join(shlex.quote(piece) for piece in command)
+    pieces: list[str] = []
+    redact_next = False
+    for piece in command:
+        if redact_next:
+            pieces.append(shlex.quote(_redact_extractor_args(piece)))
+            redact_next = False
+            continue
+        pieces.append(shlex.quote(piece))
+        if piece == "--extractor-args":
+            redact_next = True
+    return " ".join(pieces)
+
+
+def _redact_extractor_args(value: str) -> str:
+    return re.sub(r"(po_token=)[^;\s]+", r"\1<redacted>", value)
+
+
+def _has_configured_player_client(value: str | None) -> bool:
+    return bool(value and re.search(r"(?:^|[;,])player[-_]client=", value))
+
+
+def _log_ytdlp_diagnostics(context: str, stderr: str) -> None:
+    if not stderr.strip():
+        return
+    LOGGER.warning("yt-dlp %s diagnostics: %s", context, _summarize_output(stderr))
+
+
+def _summarize_output(output: str | None, *, max_length: int = 1200) -> str:
+    if not output:
+        return "none"
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return "none"
+    summary = " | ".join(lines[-8:])
+    if len(summary) <= max_length:
+        return _redact_extractor_args(summary)
+    return _redact_extractor_args(f"{summary[:max_length - 3]}...")
+
+
+def _probe_failure_details(
+    *,
+    stderr: str,
+    payload: dict[str, Any],
+    player_client: str | None,
+) -> str:
+    formats = payload.get("formats") or []
+    requested_formats = payload.get("requested_formats") or []
+    details = [
+        f"player_client={player_client or 'default'}",
+        f"format_count={len(formats)}",
+        f"requested_format_count={len(requested_formats)}",
+    ]
+    if stderr.strip():
+        details.append(stderr.strip())
+    return "\n".join(details)
 
 
 def _select_best_audio_format(

@@ -92,6 +92,11 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.log_level, "INFO")
             self.assertEqual(config.external_log_level, "WARNING")
             self.assertTrue(config.color_logs)
+            self.assertEqual(
+                config.youtube_player_clients,
+                ("android_vr", "default", "web_embedded", "web_safari", "mweb", "web"),
+            )
+            self.assertIsNone(config.youtube_extractor_args)
             self.assertIn(
                 f"directory: {music_dir.resolve().as_posix()}",
                 config.runtime_beets_config_path.read_text(encoding="utf-8"),
@@ -122,6 +127,8 @@ class ConfigTests(unittest.TestCase):
                 "LOG_LEVEL": "debug",
                 "EXTERNAL_LOG_LEVEL": "error",
                 "COLOR_LOGS": "false",
+                "YTDLP_YOUTUBE_PLAYER_CLIENTS": "mweb,web",
+                "YTDLP_YOUTUBE_EXTRACTOR_ARGS": "po_token=mweb.gvs+token",
             }
             with mock.patch.dict(os.environ, env, clear=True):
                 config = AppConfig.from_env()
@@ -135,6 +142,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.log_level, "DEBUG")
             self.assertEqual(config.external_log_level, "ERROR")
             self.assertFalse(config.color_logs)
+            self.assertEqual(config.youtube_player_clients, ("mweb", "web"))
+            self.assertEqual(config.youtube_extractor_args, "po_token=mweb.gvs+token")
 
 
 if __name__ == "__main__":

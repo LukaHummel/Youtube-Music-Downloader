@@ -20,7 +20,7 @@ class MainTests(unittest.TestCase):
 
         self.assertEqual(
             versions,
-            "yt-dlp=yt-dlp-version beets=not installed "
+            "yt-dlp=yt-dlp-version yt-dlp-ejs=yt-dlp-ejs-version beets=not installed "
             "python-telegram-bot=python-telegram-bot-version",
         )
 

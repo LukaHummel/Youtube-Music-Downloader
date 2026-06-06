@@ -6,6 +6,7 @@ from pathlib import Path
 
 CONFIG_TEMPLATE_DIR_ENV = "CONFIG_TEMPLATE_DIR"
 CONFIG_TEMPLATE_FILENAMES = ("beets.yaml", "yt-dlp.conf")
+DEFAULT_YOUTUBE_PLAYER_CLIENTS = ("android_vr", "default", "web_embedded", "web_safari", "mweb", "web")
 
 
 def _parse_allowed_ids(raw_value: str) -> frozenset[int]:
@@ -43,6 +44,16 @@ def _getenv_bool(name: str, default: bool) -> bool:
     if raw_value in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{name} must be a boolean value")
+
+
+def _getenv_csv(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw_value = os.environ.get(name, "").strip()
+    if not raw_value:
+        return default
+    values = tuple(piece.strip() for piece in raw_value.split(",") if piece.strip())
+    if not values:
+        raise ValueError(f"{name} must contain at least one value")
+    return values
 
 
 def _has_config_templates(directory: Path) -> bool:
@@ -92,6 +103,8 @@ class AppConfig:
     log_level: str
     external_log_level: str
     color_logs: bool
+    youtube_player_clients: tuple[str, ...]
+    youtube_extractor_args: str | None
     project_root: Path
     config_template_dir: Path | None = None
     telegram_connect_timeout: float = 30.0
@@ -123,6 +136,11 @@ class AppConfig:
             log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
             external_log_level=os.environ.get("EXTERNAL_LOG_LEVEL", "WARNING").upper(),
             color_logs=_getenv_bool("COLOR_LOGS", True),
+            youtube_player_clients=_getenv_csv(
+                "YTDLP_YOUTUBE_PLAYER_CLIENTS",
+                DEFAULT_YOUTUBE_PLAYER_CLIENTS,
+            ),
+            youtube_extractor_args=os.environ.get("YTDLP_YOUTUBE_EXTRACTOR_ARGS", "").strip() or None,
             project_root=project_root,
             config_template_dir=_resolve_config_template_dir(project_root),
             telegram_connect_timeout=_getenv_float("TELEGRAM_CONNECT_TIMEOUT", 30.0),

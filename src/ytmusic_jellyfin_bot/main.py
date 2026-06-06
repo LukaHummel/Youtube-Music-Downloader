@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import platform
+import shutil
+import subprocess
 import sys
 from importlib.metadata import PackageNotFoundError, version as package_version
 
@@ -14,9 +16,9 @@ from .config import AppConfig
 from .db import Database
 from .playlist_writer import PlaylistWriter
 from .worker import JobWorker
-from .ytdlp_runner import DEFAULT_FORMAT_SELECTOR, YtDlpRunner
+from .ytdlp_runner import YtDlpRunner
 
-DEPENDENCY_VERSION_PACKAGES = ("yt-dlp", "beets", "python-telegram-bot")
+DEPENDENCY_VERSION_PACKAGES = ("yt-dlp", "yt-dlp-ejs", "beets", "python-telegram-bot")
 EXTERNAL_LOGGERS = ("telegram", "httpx", "httpcore")
 PLAIN_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 COLOR_LOG_FORMAT = "%(asctime)s %(colored_level)s %(name)s: %(message)s"
@@ -65,6 +67,7 @@ def main() -> None:
         config.template_config_dir,
     )
     logger.info("Dependency versions: %s", _dependency_versions())
+    logger.info("YouTube extraction support: deno=%s", _command_version("deno", "--version"))
     logger.info(
         "Runtime paths: music=%s staging=%s state=%s cookies=%s",
         config.music_library_dir,
@@ -73,10 +76,12 @@ def main() -> None:
         "available" if config.cookies_available else "not available",
     )
     logger.info(
-        "yt-dlp runtime config=%s config_format=%s enforced_format=%s youtube_clients=default preflight_config=ignored preflight_formats=ignored",
+        "yt-dlp runtime config=%s config_format=%s download_format=resolved_audio_format_id youtube_clients=%s "
+        "custom_youtube_extractor_args=%s preflight_config=ignored preflight_formats=ignored",
         config.runtime_ytdlp_config_path,
         _find_config_format(config.runtime_ytdlp_config_path),
-        DEFAULT_FORMAT_SELECTOR,
+        ",".join(config.youtube_player_clients),
+        bool(config.youtube_extractor_args),
     )
     if not config.cookies_available:
         logger.warning(
@@ -138,6 +143,24 @@ def _dependency_versions() -> str:
             installed_version = "not installed"
         versions.append(f"{package_name}={installed_version}")
     return " ".join(versions)
+
+
+def _command_version(command: str, *args: str) -> str:
+    executable = shutil.which(command)
+    if not executable:
+        return "not installed"
+    try:
+        result = subprocess.run(
+            [executable, *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unavailable"
+    output = (result.stdout or result.stderr).splitlines()
+    return output[0].strip() if output else "installed"
 
 
 def _find_config_format(config_path) -> str:
