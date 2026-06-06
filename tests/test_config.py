@@ -60,6 +60,15 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("--embed-thumbnail", config_text)
         self.assertNotIn("ThumbnailsConvertor+ffmpeg_o", config_text)
 
+    def test_ytdlp_subtitle_language_template_uses_valid_regex(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+
+        config_text = (repo_root / "config" / "yt-dlp.conf").read_text(encoding="utf-8")
+        config_lines = config_text.splitlines()
+        subtitle_language_value = config_lines[config_lines.index("--sub-langs") + 1]
+
+        self.assertEqual(subtitle_language_value, ".*orig,-live_chat")
+
     def test_from_env_uses_config_template_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             temp_path = Path(tempdir)
