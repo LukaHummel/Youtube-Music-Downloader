@@ -28,6 +28,38 @@ SENSITIVE_KEYS = {
     "url",
 }
 
+LOGGED_METADATA_FIELDS = (
+    "track",
+    "title",
+    "artist",
+    "artists",
+    "album",
+    "albumartist",
+    "albumartists",
+    "year",
+    "track_number",
+    "track_total",
+    "tracktotal",
+    "lyrics",
+    "lyrics_source",
+    "composer",
+    "composers",
+    "ytmusic_video_id",
+    "ytmusic_album_id",
+    "ytmusic_playlist_id",
+    "ytmusic_lyrics_id",
+    "ytmusic_related_id",
+    "ytmusic_counterpart_video_id",
+    "ytmusic_video_type",
+    "ytmusic_is_explicit",
+    "ytmusic_artwork_url",
+    "ytmusic_artwork_width",
+    "ytmusic_artwork_height",
+    "ytmusic_credits",
+)
+
+MAX_LOG_VALUE_LENGTH = 100
+
 
 class YtMusicMetadataProvider:
     def __init__(
@@ -57,10 +89,41 @@ class YtMusicMetadataProvider:
 
     async def enrich_preflight(self, preflight: PreflightResult) -> PreflightResult:
         if not self.config.ytmusic_metadata_enabled:
+            LOGGER.info(
+                "ytmusic metadata enrichment skipped: enabled=False source_id=%s items=%s",
+                preflight.source_id,
+                len(preflight.items),
+            )
             return preflight
+        LOGGER.info(
+            "ytmusic metadata enrichment started: source_id=%s source_title=%s items=%s",
+            preflight.source_id,
+            _log_value(preflight.source_title),
+            len(preflight.items),
+        )
         items: list[PreflightItem] = []
+        changed_items = 0
+        all_changed_fields: set[str] = set()
+        all_added_fields: set[str] = set()
         for item in preflight.items:
-            items.append(await self.enrich_item(item))
+            enriched_item = await self.enrich_item(item)
+            changed_fields = _metadata_changed_fields(item.metadata, enriched_item.metadata)
+            added_fields = _metadata_added_fields(item.metadata, enriched_item.metadata)
+            if changed_fields:
+                changed_items += 1
+                all_changed_fields.update(changed_fields)
+                all_added_fields.update(added_fields)
+            items.append(enriched_item)
+        LOGGER.info(
+            "ytmusic metadata enrichment completed: source_id=%s items=%s changed_items=%s unchanged_items=%s "
+            "changed_fields=%s added_fields=%s",
+            preflight.source_id,
+            len(items),
+            changed_items,
+            len(items) - changed_items,
+            _field_list(all_changed_fields),
+            _field_list(all_added_fields),
+        )
         return PreflightResult(
             source_id=preflight.source_id,
             source_title=preflight.source_title,
@@ -118,9 +181,19 @@ class YtMusicMetadataProvider:
     async def _enrich_item_with_client(self, item: PreflightItem, client: Any) -> PreflightItem:
         watch = await asyncio.to_thread(client.get_watch_playlist, videoId=item.youtube_video_id, limit=1)
         if not isinstance(watch, dict):
+            LOGGER.info(
+                "ytmusic metadata result: video_id=%s client=%s matched=False reason=invalid_watch_response",
+                item.youtube_video_id,
+                _client_label(self._client_authenticated),
+            )
             return item
         track = _select_watch_track(watch, item.youtube_video_id)
         if not track:
+            LOGGER.info(
+                "ytmusic metadata result: video_id=%s client=%s matched=False reason=no_watch_tracks",
+                item.youtube_video_id,
+                _client_label(self._client_authenticated),
+            )
             return item
         enriched = dict(item.metadata)
         enriched.update(_metadata_from_watch(track, watch, item.youtube_video_id))
@@ -151,13 +224,32 @@ class YtMusicMetadataProvider:
 
         _drop_internal_metadata(enriched)
         enriched = normalize_track_metadata(enriched)
+        changed_fields = _metadata_changed_fields(item.metadata, enriched)
+        added_fields = _metadata_added_fields(item.metadata, enriched)
         LOGGER.info(
-            "Enriched ytmusic metadata: video_id=%s title=%s artist=%s album=%s authenticated=%s",
+            "ytmusic metadata result: video_id=%s client=%s matched=True matched_video_id=%s "
+            "changed_fields=%s added_fields=%s title=%s artist=%s album=%s albumartist=%s year=%s "
+            "track_number=%s track_total=%s album_id=%s playlist_id=%s lyrics=%s credits=%s artwork=%s "
+            "artwork_size=%sx%s",
             item.youtube_video_id,
-            enriched.get("track") or enriched.get("title") or "unknown",
-            enriched.get("artist") or "unknown",
-            enriched.get("album") or "unknown",
-            self._client_authenticated,
+            _client_label(self._client_authenticated),
+            _log_value(enriched.get("ytmusic_video_id")),
+            _field_list(changed_fields),
+            _field_list(added_fields),
+            _log_value(enriched.get("track") or enriched.get("title")),
+            _log_value(enriched.get("artist")),
+            _log_value(enriched.get("album")),
+            _log_value(enriched.get("albumartist")),
+            _log_value(enriched.get("year")),
+            _log_value(enriched.get("track_number")),
+            _log_value(enriched.get("track_total")),
+            _log_value(enriched.get("ytmusic_album_id")),
+            _log_value(enriched.get("ytmusic_playlist_id")),
+            bool(enriched.get("lyrics")),
+            bool(enriched.get("ytmusic_credits")),
+            bool(enriched.get("ytmusic_artwork_url")),
+            enriched.get("ytmusic_artwork_width") or 0,
+            enriched.get("ytmusic_artwork_height") or 0,
         )
         return PreflightItem(
             item_index=item.item_index,
@@ -525,6 +617,60 @@ def _text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _metadata_changed_fields(before: Mapping[str, Any], after: Mapping[str, Any]) -> list[str]:
+    fields: list[str] = []
+    for field in LOGGED_METADATA_FIELDS:
+        after_value = after.get(field)
+        if not _has_loggable_value(after_value):
+            continue
+        if before.get(field) != after_value:
+            fields.append(field)
+    return fields
+
+
+def _metadata_added_fields(before: Mapping[str, Any], after: Mapping[str, Any]) -> list[str]:
+    fields: list[str] = []
+    for field in LOGGED_METADATA_FIELDS:
+        if _has_loggable_value(after.get(field)) and not _has_loggable_value(before.get(field)):
+            fields.append(field)
+    return fields
+
+
+def _has_loggable_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return True
+
+
+def _field_list(fields: set[str] | list[str]) -> str:
+    return ",".join(sorted(fields)) if fields else "none"
+
+
+def _client_label(authenticated: bool) -> str:
+    return "authenticated" if authenticated else "anonymous"
+
+
+def _log_value(value: Any) -> str:
+    if value is None:
+        return "unknown"
+    if isinstance(value, list):
+        text = ", ".join(str(item) for item in value)
+    else:
+        text = str(value)
+    text = " ".join(text.split())
+    if not text:
+        return "unknown"
+    if len(text) > MAX_LOG_VALUE_LENGTH:
+        return f"{text[: MAX_LOG_VALUE_LENGTH - 3]}..."
+    return text
 
 
 def _timeout_session(config: AppConfig) -> requests.Session:

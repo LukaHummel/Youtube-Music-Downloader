@@ -135,7 +135,7 @@ def _text_list(value: Any) -> list[str]:
 
 
 def _year_from_metadata(metadata: Mapping[str, Any]) -> int | None:
-    for key in ("meta_date", "release_date", "upload_date", "date"):
+    for key in ("year", "meta_date", "release_date", "upload_date", "date"):
         value = _text(metadata.get(key))
         if not value:
             continue

@@ -146,7 +146,13 @@ class JobWorker:
             return
 
         if self.ytmusic:
+            LOGGER.info(
+                "Job #%s ytmusic metadata enrichment started: enabled=%s",
+                job.id,
+                getattr(self.config, "ytmusic_metadata_enabled", True),
+            )
             preflight = await self.ytmusic.enrich_preflight(preflight)
+            LOGGER.info("Job #%s ytmusic metadata enrichment completed", job.id)
 
         self.db.replace_job_items(job.id, preflight.items)
         LOGGER.info(

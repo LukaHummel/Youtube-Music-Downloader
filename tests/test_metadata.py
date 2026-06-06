@@ -82,6 +82,7 @@ class MetadataTests(unittest.TestCase):
 
         self.assertEqual(tags["artists"], ["Artist", "Guest"])
         self.assertEqual(tags["albumartists"], ["Album Artist"])
+        self.assertEqual(tags["year"], 2026)
         self.assertEqual(tags["tracktotal"], 10)
         self.assertEqual(tags["lyrics"], "Line 1\nLine 2")
         self.assertEqual(tags["composer"], "Writer")

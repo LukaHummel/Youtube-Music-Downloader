@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ytmusic_jellyfin_bot.models import PreflightItem
+from ytmusic_jellyfin_bot.models import PreflightItem, PreflightResult
 from ytmusic_jellyfin_bot.ytmusic_auth import YtMusicAuthManager, YtMusicAuthStatus
 from ytmusic_jellyfin_bot.ytmusic_metadata import YtMusicMetadataProvider
 
@@ -340,6 +340,73 @@ class YtMusicMetadataTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("url", metadata["ytmusic_credits"]["written_by"])
         self.assertNotIn("ytmusic_album_thumbnails", metadata)
         self.assertNotIn("ytmusic_watch_thumbnails", metadata)
+
+    async def test_enrichment_logs_added_value_without_sensitive_content(self) -> None:
+        client = FakeYtMusicClient(
+            watch={
+                "playlistId": "PL",
+                "lyrics": "LYRICS",
+                "tracks": [
+                    {
+                        "videoId": "target",
+                        "title": "Song",
+                        "artists": [{"name": "Artist"}],
+                        "album": {"name": "Single", "id": "ALB"},
+                    }
+                ],
+            },
+            albums={
+                "ALB": {
+                    "title": "Album",
+                    "artists": [{"name": "Album Artist"}],
+                    "year": "2025",
+                    "trackCount": "12",
+                    "thumbnails": [{"url": "https://example.com/cover.jpg", "width": 500, "height": 500}],
+                    "tracks": [
+                        {
+                            "videoId": "target",
+                            "trackNumber": "7",
+                            "creditsBrowseId": "CREDITS",
+                        }
+                    ],
+                }
+            },
+            credits={
+                "CREDITS": {
+                    "written_by": {
+                        "localized_title": "Written by",
+                        "data": ["Writer"],
+                        "url": "https://secret.example",
+                    },
+                    "feedbackTokens": {"token": "secret-token"},
+                }
+            },
+            lyrics={"LYRICS": {"lyrics": "Line 1\nLine 2", "source": "YouTube Music"}},
+        )
+        provider, _auth = self._provider(client)
+        preflight = PreflightResult(
+            source_id="target",
+            source_title="Fallback",
+            playlist_title=None,
+            items=[_item()],
+        )
+
+        with self.assertLogs("ytmusic_jellyfin_bot.ytmusic_metadata", level="INFO") as logs:
+            await provider.enrich_preflight(preflight)
+
+        output = "\n".join(logs.output)
+        self.assertIn("ytmusic metadata enrichment started", output)
+        self.assertIn("ytmusic metadata result", output)
+        self.assertIn("changed_fields=", output)
+        self.assertIn("added_fields=", output)
+        self.assertIn("lyrics=True", output)
+        self.assertIn("credits=True", output)
+        self.assertIn("artwork=True", output)
+        self.assertIn("ytmusic metadata enrichment completed", output)
+        self.assertNotIn("Line 1", output)
+        self.assertNotIn("Line 2", output)
+        self.assertNotIn("secret-token", output)
+        self.assertNotIn("secret.example", output)
 
 
 if __name__ == "__main__":
