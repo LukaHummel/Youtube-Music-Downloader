@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -17,6 +18,7 @@ from .ytdlp_runner import YtDlpError, YtDlpRunner
 from .ytmusic_metadata import YtMusicMetadataProvider
 
 Notifier = Callable[[int, str, int | None], Awaitable[None]]
+ProgressNotifier = Callable[[int, bool], Awaitable[None]]
 
 LOGGER = logging.getLogger(__name__)
 MAX_ERROR_DETAIL_LENGTH = 1500
@@ -43,9 +45,13 @@ class JobWorker:
         self._wake_event = asyncio.Event()
         self._stopping = False
         self._notifier: Notifier | None = None
+        self._progress_notifier: ProgressNotifier | None = None
 
     def set_notifier(self, notifier: Notifier) -> None:
         self._notifier = notifier
+
+    def set_progress_notifier(self, notifier: ProgressNotifier) -> None:
+        self._progress_notifier = notifier
 
     async def start(self) -> None:
         if self._task is None:
@@ -85,6 +91,7 @@ class JobWorker:
                     error_message="Unhandled internal error.",
                     finished_at=self._timestamp(),
                 )
+                await self._notify_progress(job.id, True)
                 await self._notify(job.chat_id, f"Job #{job.id} failed with an internal error.", job.id)
 
     async def _process_job(self, job: JobRecord) -> None:
@@ -107,7 +114,9 @@ class JobWorker:
             progress_eta_seconds=None,
             progress_speed=None,
         )
+        await self._notify_progress(job.id, True)
         self.db.update_job(job.id, status=JobStatus.PREFLIGHT)
+        await self._notify_progress(job.id, True)
         LOGGER.info("Job #%s preflight started", job.id)
 
         try:
@@ -132,6 +141,7 @@ class JobWorker:
                 error_message=message,
                 finished_at=self._timestamp(),
             )
+            await self._notify_progress(job.id, True)
             await self._notify(job.chat_id, f"Job #{job.id} failed during preflight.\n{message}", job.id)
             return
 
@@ -153,6 +163,7 @@ class JobWorker:
             playlist_title=preflight.playlist_title,
             total_items=len(preflight.items),
         )
+        await self._notify_progress(job.id, True)
 
         track_paths: list[Path] = []
         imported_count = 0
@@ -170,6 +181,7 @@ class JobWorker:
                     result_summary=f"Cancelled after {imported_count} imported items.",
                     finished_at=self._timestamp(),
                 )
+                await self._notify_progress(job.id, True)
                 await self._notify(job.chat_id, f"Job #{job.id} was cancelled.", job.id)
                 return
 
@@ -197,6 +209,7 @@ class JobWorker:
                     status=ItemStatus.SKIPPED_EXISTING,
                     final_path=str(final_path),
                 )
+                await self._notify_progress(job.id, True)
                 track_paths.append(final_path)
                 continue
 
@@ -206,6 +219,7 @@ class JobWorker:
                 current_item_index=item.item_index,
             )
             self.db.update_job_item(item.id, status=ItemStatus.DOWNLOADING)
+            await self._notify_progress(job.id, True)
             LOGGER.info(
                 "Job #%s item %s/%s download started: video_id=%s title=%s",
                 job.id,
@@ -240,6 +254,7 @@ class JobWorker:
                     _error_details(exc),
                 )
                 self.db.update_job_item(item.id, status=ItemStatus.FAILED, error_message=failure_message)
+                await self._notify_progress(job.id, True)
                 continue
 
             self.db.update_job(job.id, status=JobStatus.RETAGGING)
@@ -254,6 +269,7 @@ class JobWorker:
                 status=ItemStatus.RETAGGING,
                 download_path=str(download_result.audio_path),
             )
+            await self._notify_progress(job.id, True)
             metadata = self._load_metadata(item, download_result.info_json_path)
 
             try:
@@ -267,6 +283,7 @@ class JobWorker:
                     str(exc),
                 )
                 self.db.update_job_item(item.id, status=ItemStatus.FAILED, error_message=str(exc))
+                await self._notify_progress(job.id, True)
                 continue
 
             title = metadata.get("track") or metadata.get("title")
@@ -302,6 +319,7 @@ class JobWorker:
                     final_path=str(final_path),
                     mb_trackid=mb_trackid,
                 )
+                await self._notify_progress(job.id, True)
                 self.db.upsert_source_mapping(
                     source_key=source_key,
                     youtube_video_id=item.youtube_video_id,
@@ -313,6 +331,12 @@ class JobWorker:
                     title=title,
                 )
                 self.beets.write_baseline_tags(final_path, metadata, overwrite=False)
+                self._cleanup_download_folder(
+                    job_id=job.id,
+                    item_index=item.item_index,
+                    audio_path=download_result.audio_path,
+                    final_path=final_path,
+                )
                 track_paths.append(final_path)
                 continue
 
@@ -328,6 +352,7 @@ class JobWorker:
                     status=ItemStatus.SKIPPED_AMBIGUOUS,
                     error_message="Duplicate candidates were ambiguous.",
                 )
+                await self._notify_progress(job.id, True)
                 continue
 
             failed_count += 1
@@ -343,10 +368,12 @@ class JobWorker:
                 status=ItemStatus.FAILED,
                 error_message=import_result.reason or "Import failed.",
             )
+            await self._notify_progress(job.id, True)
 
         playlist_path: Path | None = None
         if job.request_kind is RequestKind.PLAYLIST and track_paths:
             self.db.update_job(job.id, status=JobStatus.PLAYLIST_BUILDING)
+            await self._notify_progress(job.id, True)
             playlist_title = preflight.playlist_title or preflight.source_title or f"Playlist {job.id}"
             playlist_path = self.playlist_writer.write_playlist(
                 playlist_title=playlist_title,
@@ -370,6 +397,7 @@ class JobWorker:
             progress_eta_seconds=0,
             finished_at=self._timestamp(),
         )
+        await self._notify_progress(job.id, True)
         log_method = LOGGER.info if final_status is JobStatus.COMPLETED else LOGGER.warning
         log_method("Job #%s finished: status=%s %s", job.id, final_status, summary)
         await self._notify(job.chat_id, f"Job #{job.id} finished.\n{summary}", job.id)
@@ -387,6 +415,7 @@ class JobWorker:
             progress_eta_seconds=eta,
             progress_speed=speed,
         )
+        await self._notify_progress(job_id, False)
 
     def _load_metadata(self, item: JobItemRecord, info_json_path: Path | None) -> dict[str, Any]:
         metadata = json.loads(item.metadata_json)
@@ -411,11 +440,102 @@ class JobWorker:
             return path
         return self.config.music_library_dir / path
 
+    def _cleanup_download_folder(
+        self,
+        *,
+        job_id: int,
+        item_index: int,
+        audio_path: Path,
+        final_path: Path,
+    ) -> None:
+        cleanup_paths = self._download_cleanup_paths(job_id, item_index, audio_path)
+        if cleanup_paths is None:
+            return
+        item_dir, staging_dir = cleanup_paths
+        final_resolved = final_path.resolve(strict=False)
+        if final_path.exists() and final_resolved.is_relative_to(item_dir):
+            LOGGER.warning(
+                "Skipping temporary download cleanup because the final path is inside the staging folder: "
+                "item_dir=%s final_path=%s",
+                item_dir,
+                final_path,
+            )
+            return
+
+        try:
+            shutil.rmtree(item_dir)
+        except FileNotFoundError:
+            LOGGER.debug("Temporary download folder was already removed: path=%s", item_dir)
+            return
+        except OSError as exc:
+            LOGGER.warning("Could not clean up temporary download folder: path=%s error=%s", item_dir, exc)
+            return
+
+        LOGGER.info("Cleaned up temporary download folder: path=%s", item_dir)
+        self._remove_empty_download_parents(item_dir.parent, staging_dir)
+
+    def _download_cleanup_paths(
+        self,
+        job_id: int,
+        item_index: int,
+        audio_path: Path,
+    ) -> tuple[Path, Path] | None:
+        staging_value = getattr(self.config, "staging_dir", None)
+        if not staging_value:
+            return None
+
+        try:
+            staging_dir = Path(staging_value).resolve(strict=False)
+            item_dir = (staging_dir / str(job_id) / f"{item_index:04d}").resolve(strict=False)
+            audio_resolved = audio_path.resolve(strict=False)
+        except OSError as exc:
+            LOGGER.warning("Could not resolve temporary download cleanup paths: %s", exc)
+            return None
+
+        if not item_dir.is_relative_to(staging_dir):
+            LOGGER.warning(
+                "Skipping temporary download cleanup because the item folder is outside staging: "
+                "staging_dir=%s item_dir=%s",
+                staging_dir,
+                item_dir,
+            )
+            return None
+        if not audio_resolved.is_relative_to(item_dir):
+            LOGGER.warning(
+                "Skipping temporary download cleanup because the audio file is outside the expected item folder: "
+                "item_dir=%s audio_path=%s",
+                item_dir,
+                audio_path,
+            )
+            return None
+        return item_dir, staging_dir
+
+    def _remove_empty_download_parents(self, start: Path, staging_dir: Path) -> None:
+        current = start
+        while current != staging_dir and current.is_relative_to(staging_dir):
+            try:
+                current.rmdir()
+            except FileNotFoundError:
+                current = current.parent
+                continue
+            except OSError:
+                break
+            LOGGER.debug("Removed empty temporary download parent folder: path=%s", current)
+            current = current.parent
+
     async def _notify(self, chat_id: int, message: str, job_id: int | None) -> None:
         self.db.add_message(direction="outgoing", body=message, job_id=job_id, telegram_chat_id=chat_id)
         if self._notifier:
             LOGGER.debug("Sending Telegram notification for job_id=%s chat_id=%s", job_id, chat_id)
             await self._notifier(chat_id, message, job_id)
+
+    async def _notify_progress(self, job_id: int, force: bool) -> None:
+        if not self._progress_notifier:
+            return
+        try:
+            await self._progress_notifier(job_id, force)
+        except Exception:
+            LOGGER.exception("Telegram progress notification failed for job_id=%s", job_id)
 
     @staticmethod
     def _timestamp() -> str:

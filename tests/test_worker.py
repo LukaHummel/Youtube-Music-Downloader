@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from ytmusic_jellyfin_bot.beets_runner import BeetsError
 from ytmusic_jellyfin_bot.db import Database
 from ytmusic_jellyfin_bot.models import (
     DownloadResult,
@@ -48,6 +49,13 @@ class FakeYtDlp:
         return DownloadResult(audio_path=self.audio_path, info_json_path=None)
 
 
+class FakeProgressYtDlp(FakeYtDlp):
+    async def download_track(self, **kwargs) -> DownloadResult:
+        self.download_called = True
+        await kwargs["progress_callback"](10.0, 30, "1.0MiB/s")
+        return DownloadResult(audio_path=self.audio_path, info_json_path=None)
+
+
 class FakeYtMusic:
     async def enrich_preflight(self, preflight: PreflightResult) -> PreflightResult:
         item = preflight.items[0]
@@ -76,16 +84,23 @@ class FakeYtMusic:
 
 
 class FakeBeets:
-    def __init__(self):
+    def __init__(self, *, final_path: Path | None = None):
         self.imported_metadata = None
         self.baseline_writes = []
+        self.final_path = final_path
 
     async def import_track(self, audio_path: Path, metadata: dict) -> ImportResult:
         self.imported_metadata = metadata
-        return ImportResult(status="imported", final_path=audio_path)
+        return ImportResult(status="imported", final_path=self.final_path or audio_path)
 
     def write_baseline_tags(self, audio_path: Path, metadata: dict, *, overwrite: bool) -> None:
         self.baseline_writes.append((audio_path, metadata, overwrite))
+
+
+class FailingBeets(FakeBeets):
+    async def import_track(self, audio_path: Path, metadata: dict) -> ImportResult:
+        self.imported_metadata = metadata
+        raise BeetsError("import failed")
 
 
 class FakePlaylistWriter:
@@ -173,6 +188,115 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(item.status, ItemStatus.SKIPPED_EXISTING)
             self.assertEqual(item.final_path, str(final_path))
             self.assertEqual(beets.baseline_writes[0][0], final_path)
+
+    async def test_worker_emits_forced_and_download_progress_notifications(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            temp_path = Path(tempdir)
+            audio_path = temp_path / "track.m4a"
+            audio_path.write_bytes(b"placeholder")
+            db = Database(temp_path / "app.db")
+            job = db.create_job(
+                source_url="https://music.youtube.com/watch?v=video",
+                normalized_url="https://music.youtube.com/watch?v=video",
+                request_kind=RequestKind.TRACK,
+                chat_id=1,
+                user_id=2,
+                requested_by="tester",
+                source_id="video",
+            )
+            worker = JobWorker(
+                config=SimpleNamespace(),
+                db=db,
+                ytdlp=FakeProgressYtDlp(audio_path),
+                beets=FakeBeets(),
+                playlist_writer=FakePlaylistWriter(),
+                ytmusic=FakeYtMusic(),
+            )
+            progress_calls = []
+
+            async def progress_notifier(job_id: int, force: bool) -> None:
+                progress_calls.append((job_id, force))
+
+            worker.set_progress_notifier(progress_notifier)
+
+            await worker._process_job(job)
+
+            self.assertIn((job.id, True), progress_calls)
+            self.assertIn((job.id, False), progress_calls)
+
+    async def test_successful_import_cleans_temporary_download_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            temp_path = Path(tempdir)
+            staging_dir = temp_path / "downloads"
+            item_dir = staging_dir / "1" / "0001"
+            download_dir = item_dir / "Raw Artist"
+            download_dir.mkdir(parents=True)
+            audio_path = download_dir / "Raw Title.m4a"
+            info_json_path = download_dir / "Raw Title.info.json"
+            audio_path.write_bytes(b"placeholder")
+            info_json_path.write_text("{}", encoding="utf-8")
+            music_library_dir = temp_path / "music"
+            final_path = music_library_dir / "Raw Artist" / "Singles" / "Raw Title.m4a"
+            final_path.parent.mkdir(parents=True)
+            final_path.write_bytes(b"imported")
+            db = Database(temp_path / "app.db")
+            job = db.create_job(
+                source_url="https://music.youtube.com/watch?v=video",
+                normalized_url="https://music.youtube.com/watch?v=video",
+                request_kind=RequestKind.TRACK,
+                chat_id=1,
+                user_id=2,
+                requested_by="tester",
+                source_id="video",
+            )
+            beets = FakeBeets(final_path=final_path)
+            worker = JobWorker(
+                config=SimpleNamespace(staging_dir=staging_dir, music_library_dir=music_library_dir),
+                db=db,
+                ytdlp=FakeYtDlp(audio_path),
+                beets=beets,
+                playlist_writer=FakePlaylistWriter(),
+            )
+
+            await worker._process_job(job)
+
+            item = db.get_job_items(job.id)[0]
+            self.assertEqual(item.status, ItemStatus.IMPORTED)
+            self.assertFalse(item_dir.exists())
+            self.assertFalse((staging_dir / "1").exists())
+            self.assertTrue(final_path.exists())
+
+    async def test_failed_import_keeps_temporary_download_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            temp_path = Path(tempdir)
+            staging_dir = temp_path / "downloads"
+            item_dir = staging_dir / "1" / "0001"
+            item_dir.mkdir(parents=True)
+            audio_path = item_dir / "Raw Title.m4a"
+            audio_path.write_bytes(b"placeholder")
+            db = Database(temp_path / "app.db")
+            job = db.create_job(
+                source_url="https://music.youtube.com/watch?v=video",
+                normalized_url="https://music.youtube.com/watch?v=video",
+                request_kind=RequestKind.TRACK,
+                chat_id=1,
+                user_id=2,
+                requested_by="tester",
+                source_id="video",
+            )
+            worker = JobWorker(
+                config=SimpleNamespace(staging_dir=staging_dir),
+                db=db,
+                ytdlp=FakeYtDlp(audio_path),
+                beets=FailingBeets(),
+                playlist_writer=FakePlaylistWriter(),
+            )
+
+            await worker._process_job(job)
+
+            item = db.get_job_items(job.id)[0]
+            self.assertEqual(item.status, ItemStatus.FAILED)
+            self.assertTrue(item_dir.exists())
 
 
 if __name__ == "__main__":

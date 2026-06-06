@@ -5,6 +5,7 @@ This service accepts YouTube and YouTube Music URLs through a private Telegram b
 ## Features
 
 - Telegram-only v1 interface with long polling
+- Editable Telegram progress cards with inline refresh, cancel, retry, and source-link buttons
 - Public and private playlist support via mounted `cookies.txt`
 - YouTube URL normalization to `music.youtube.com`
 - `yt-dlp` download pipeline based on the existing Jellyfin-focused config
@@ -116,3 +117,15 @@ The app already defaults to `/music`, `/downloads`, `/data`, and `/run/secrets/y
 - `/ytmusic_auth_reset`
 
 Plain text messages containing a supported URL also queue a job.
+
+Queued jobs are acknowledged with a live progress card. The card is edited in place during preflight,
+download, retagging, playlist creation, and final completion or failure. Download progress updates are
+throttled to avoid chat spam, while phase changes are shown immediately. The bot still sends one final
+completion/failure notification so Telegram surfaces the finished job.
+
+Progress cards include inline buttons:
+
+- `Refresh` redraws the card from the latest database state.
+- `Cancel` cancels queued jobs or requests cancellation for the active job.
+- `Retry` requeues failed, partial, or cancelled jobs.
+- `Open source` opens the normalized YouTube Music URL.

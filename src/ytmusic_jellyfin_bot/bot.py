@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
+from html import escape
+from time import monotonic
 
-from telegram import Chat, Message, Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import Chat, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram.constants import ParseMode
+from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from .config import AppConfig
 from .db import Database
-from .models import JobStatus, RequestKind
+from .models import ItemStatus, JobItemRecord, JobRecord, JobStatus, RequestKind
 from .normalizer import NormalizationError, normalize_url
 from .worker import JobWorker
 from .ytmusic_auth import YtMusicAuthManager, YtMusicAuthStartStatus
@@ -24,6 +29,30 @@ YOUTUBE_URL_RE = re.compile(
     re.IGNORECASE,
 )
 TRAILING_URL_PUNCTUATION = ".,;:!?\"'"
+JOB_CALLBACK_RE = re.compile(r"^job:(?P<action>refresh|cancel|retry):(?P<job_id>\d+)$")
+PROGRESS_THROTTLE_SECONDS = 10.0
+PROGRESS_THROTTLE_PERCENT_DELTA = 5.0
+PROGRESS_BAR_WIDTH = 10
+SOURCE_LABEL_MAX_LENGTH = 160
+CURRENT_ITEM_MAX_LENGTH = 180
+RESULT_SUMMARY_MAX_LENGTH = 600
+ERROR_MESSAGE_MAX_LENGTH = 900
+ACTIVE_JOB_STATUSES = {
+    JobStatus.QUEUED,
+    JobStatus.NORMALIZING,
+    JobStatus.PREFLIGHT,
+    JobStatus.DOWNLOADING,
+    JobStatus.RETAGGING,
+    JobStatus.PLAYLIST_BUILDING,
+}
+RETRYABLE_JOB_STATUSES = {JobStatus.FAILED, JobStatus.PARTIAL, JobStatus.CANCELLED}
+
+
+@dataclass(slots=True)
+class _ProgressEditState:
+    rendered_text: str | None = None
+    last_edit_monotonic: float = 0.0
+    last_percent: float | None = None
 
 
 class TelegramBotService:
@@ -42,6 +71,7 @@ class TelegramBotService:
         self.ytmusic_auth = ytmusic_auth
         self.ytmusic_metadata = ytmusic_metadata
         self.application: Application | None = None
+        self._progress_edit_state: dict[int, _ProgressEditState] = {}
 
     def build(self) -> Application:
         application = (
@@ -70,6 +100,7 @@ class TelegramBotService:
         application.add_handler(CommandHandler("ytmusic_auth", self.ytmusic_auth_command))
         application.add_handler(CommandHandler("ytmusic_auth_status", self.ytmusic_auth_status_command))
         application.add_handler(CommandHandler("ytmusic_auth_reset", self.ytmusic_auth_reset_command))
+        application.add_handler(CallbackQueryHandler(self.job_callback, pattern=JOB_CALLBACK_RE.pattern))
         plain_url_filter = (filters.TEXT | filters.CAPTION) & ~filters.COMMAND
         application.add_handler(MessageHandler(plain_url_filter, self.text_message))
         self.application = application
@@ -77,6 +108,7 @@ class TelegramBotService:
 
     async def _post_init(self, application: Application) -> None:
         self.worker.set_notifier(self.send_notification)
+        self.worker.set_progress_notifier(self.update_progress_card)
         await self.worker.start()
 
     async def _post_shutdown(self, application: Application) -> None:
@@ -86,6 +118,201 @@ class TelegramBotService:
         assert self.application is not None
         LOGGER.debug("Sending Telegram message for job_id=%s chat_id=%s", job_id, chat_id)
         await self.application.bot.send_message(chat_id=chat_id, text=message)
+
+    async def update_progress_card(self, job_id: int, force: bool) -> None:
+        try:
+            job = self.db.get_job(job_id)
+        except KeyError:
+            LOGGER.debug("Skipping progress card update for unknown job_id=%s", job_id)
+            return
+
+        if not force and not self._should_edit_progress(job):
+            return
+
+        text, reply_markup = self._render_progress_payload(job)
+        state = self._progress_edit_state.get(job.id)
+        if state and state.rendered_text == text:
+            return
+
+        if job.progress_message_id is None:
+            await self._send_replacement_progress_card(job, text, reply_markup)
+            return
+
+        if self.application is None:
+            LOGGER.debug("Skipping progress card edit before Telegram application is available")
+            return
+
+        try:
+            await self.application.bot.edit_message_text(
+                chat_id=job.chat_id,
+                message_id=job.progress_message_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+            )
+        except BadRequest as exc:
+            lowered = str(exc).lower()
+            if "message is not modified" in lowered:
+                self._remember_progress_state(job, text)
+                return
+            if _is_uneditable_message_error(lowered):
+                await self._send_replacement_progress_card(job, text, reply_markup)
+                return
+            LOGGER.warning("Telegram progress card edit failed for job_id=%s: %s", job.id, exc)
+            return
+        except RetryAfter as exc:
+            LOGGER.warning(
+                "Telegram rate-limited progress card edit for job_id=%s retry_after=%ss",
+                job.id,
+                exc.retry_after,
+            )
+            return
+        except (NetworkError, TimedOut) as exc:
+            LOGGER.warning("Telegram progress card edit skipped for job_id=%s: %s", job.id, exc)
+            return
+
+        self._remember_progress_state(job, text)
+
+    async def job_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if query is None:
+            return
+        if not await self._ensure_allowed(update):
+            await self._answer_callback(query, "This bot is restricted.", show_alert=True)
+            return
+
+        match = JOB_CALLBACK_RE.match(query.data or "")
+        if match is None:
+            await self._answer_callback(query, "Unknown action.")
+            return
+
+        action = match.group("action")
+        job_id = int(match.group("job_id"))
+        if action == "refresh":
+            await self.update_progress_card(job_id, True)
+            await self._answer_callback(query, "Progress refreshed.")
+            return
+        if action == "cancel":
+            await self._cancel_from_callback(query, job_id)
+            return
+        if action == "retry":
+            await self._retry_from_callback(query, job_id)
+            return
+
+        await self._answer_callback(query, "Unknown action.")
+
+    async def _cancel_from_callback(self, query, job_id: int) -> None:
+        if self.db.cancel_if_queued(job_id):
+            await self.update_progress_card(job_id, True)
+            await self._answer_callback(query, f"Job #{job_id} cancelled.")
+            return
+        try:
+            job = self.db.get_job(job_id)
+        except KeyError:
+            await self._answer_callback(query, "Unknown job.")
+            return
+        if job.status not in ACTIVE_JOB_STATUSES:
+            await self.update_progress_card(job_id, True)
+            await self._answer_callback(query, f"Job #{job_id} is already finished.")
+            return
+        self.db.mark_cancel_requested(job_id)
+        await self.update_progress_card(job_id, True)
+        await self._answer_callback(query, f"Cancellation requested for job #{job_id}.")
+
+    async def _retry_from_callback(self, query, job_id: int) -> None:
+        if not self.db.requeue_job(job_id):
+            await self.update_progress_card(job_id, True)
+            await self._answer_callback(query, "Only failed, partial, or cancelled jobs can be retried.")
+            return
+        self.worker.wake()
+        await self.update_progress_card(job_id, True)
+        await self._answer_callback(query, f"Job #{job_id} requeued.")
+
+    async def _answer_callback(self, query, text: str, *, show_alert: bool = False) -> None:
+        try:
+            await query.answer(text=text, show_alert=show_alert)
+        except (BadRequest, NetworkError, RetryAfter, TimedOut) as exc:
+            LOGGER.warning("Telegram callback answer failed: %s", exc)
+
+    async def _send_initial_progress_card(self, reply_to: Message, job: JobRecord) -> None:
+        text, reply_markup = self._render_progress_payload(job)
+        try:
+            sent = await reply_to.reply_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+            )
+        except (BadRequest, NetworkError, RetryAfter, TimedOut) as exc:
+            LOGGER.warning("Telegram initial progress card send failed for job_id=%s: %s", job.id, exc)
+            await self._send_replacement_progress_card(job, text, reply_markup)
+            return
+
+        message_id = getattr(sent, "message_id", None)
+        if message_id is not None:
+            self.db.update_job(job.id, progress_message_id=int(message_id))
+        self._remember_progress_state(job, text)
+
+    async def _send_replacement_progress_card(
+        self,
+        job: JobRecord,
+        text: str,
+        reply_markup: InlineKeyboardMarkup,
+    ) -> None:
+        if self.application is None:
+            LOGGER.debug("Skipping replacement progress card before Telegram application is available")
+            return
+        try:
+            sent = await self.application.bot.send_message(
+                chat_id=job.chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+            )
+        except RetryAfter as exc:
+            LOGGER.warning(
+                "Telegram rate-limited replacement progress card for job_id=%s retry_after=%ss",
+                job.id,
+                exc.retry_after,
+            )
+            return
+        except (BadRequest, NetworkError, TimedOut) as exc:
+            LOGGER.warning("Telegram replacement progress card failed for job_id=%s: %s", job.id, exc)
+            return
+
+        message_id = getattr(sent, "message_id", None)
+        if message_id is not None:
+            self.db.update_job(job.id, progress_message_id=int(message_id))
+        self._remember_progress_state(job, text)
+
+    def _render_progress_payload(self, job: JobRecord) -> tuple[str, InlineKeyboardMarkup]:
+        items = self.db.get_job_items(job.id)
+        return _render_progress_card(job, items), _build_progress_keyboard(job)
+
+    def _should_edit_progress(self, job: JobRecord) -> bool:
+        state = self._progress_edit_state.get(job.id)
+        if state is None:
+            return True
+        now = monotonic()
+        elapsed = now - state.last_edit_monotonic
+        if elapsed >= PROGRESS_THROTTLE_SECONDS:
+            return True
+        percent_changed = False
+        if job.progress_percent != state.last_percent:
+            if job.progress_percent is None or state.last_percent is None:
+                percent_changed = True
+            else:
+                percent_changed = abs(job.progress_percent - state.last_percent) >= PROGRESS_THROTTLE_PERCENT_DELTA
+        return percent_changed
+
+    def _remember_progress_state(self, job: JobRecord, rendered_text: str) -> None:
+        self._progress_edit_state[job.id] = _ProgressEditState(
+            rendered_text=rendered_text,
+            last_edit_monotonic=monotonic(),
+            last_percent=job.progress_percent,
+        )
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._ensure_allowed(update):
@@ -198,6 +425,7 @@ class TelegramBotService:
             await message.reply_text("Only failed, partial, or cancelled jobs can be retried.")
             return
         self.worker.wake()
+        await self.update_progress_card(job_id, True)
         await message.reply_text(f"Job #{job_id} requeued.")
 
     async def cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -213,6 +441,7 @@ class TelegramBotService:
             await message.reply_text("Job ID must be numeric.")
             return
         if self.db.cancel_if_queued(job_id):
+            await self.update_progress_card(job_id, True)
             await message.reply_text(f"Queued job #{job_id} cancelled.")
             return
         try:
@@ -220,10 +449,11 @@ class TelegramBotService:
         except KeyError:
             await message.reply_text("Unknown job ID.")
             return
-        if job.status in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}:
+        if job.status in {JobStatus.COMPLETED, JobStatus.PARTIAL, JobStatus.FAILED, JobStatus.CANCELLED}:
             await message.reply_text(f"Job #{job_id} is already finished.")
             return
         self.db.mark_cancel_requested(job_id)
+        await self.update_progress_card(job_id, True)
         await message.reply_text(f"Cancellation requested for job #{job_id}.")
 
     async def ytmusic_auth_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -339,10 +569,8 @@ class TelegramBotService:
             chat_id,
             normalized.normalized_url,
         )
+        await self._send_initial_progress_card(message, job)
         self.worker.wake()
-        await message.reply_text(
-            f"Queued job #{job.id} as {normalized.request_kind}.\n{normalized.normalized_url}"
-        )
 
     async def _ensure_allowed(self, update: Update) -> bool:
         user = update.effective_user
@@ -377,6 +605,115 @@ class TelegramBotService:
         if chat is None:
             raise ValueError("Telegram update does not include a chat.")
         return chat
+
+
+def _render_progress_card(job: JobRecord, items: list[JobItemRecord]) -> str:
+    source_label = job.source_title or job.playlist_title or job.normalized_url
+    lines = [
+        f"<b>Job #{job.id}</b>",
+        f"Status: <b>{_html(_pretty_status(job.status))}</b>",
+        f"Type: {_html(_pretty_status(job.request_kind))}",
+        f"Source: {_html(_truncate(source_label, SOURCE_LABEL_MAX_LENGTH))}",
+        f"Items: {job.current_item_index}/{job.total_items}",
+    ]
+
+    current_item = _current_item_for(job, items)
+    if current_item:
+        current_label = _format_current_item(current_item)
+        if current_label:
+            lines.append(f"Current: {_html(_truncate(current_label, CURRENT_ITEM_MAX_LENGTH))}")
+
+    lines.append(f"Progress: {_html(_format_progress(job.progress_percent))}")
+
+    if job.progress_eta_seconds is not None:
+        lines.append(f"ETA: {_html(_format_eta(job.progress_eta_seconds))}")
+    if job.progress_speed:
+        lines.append(f"Speed: {_html(_truncate(job.progress_speed, 80))}")
+    if job.cancel_requested:
+        lines.append("Cancellation: requested")
+    if job.result_summary:
+        lines.extend(("", f"Result: {_html(_truncate(job.result_summary, RESULT_SUMMARY_MAX_LENGTH))}"))
+    if job.error_message:
+        lines.extend(("", f"Error: {_html(_truncate(job.error_message, ERROR_MESSAGE_MAX_LENGTH))}"))
+
+    return "\n".join(lines)
+
+
+def _build_progress_keyboard(job: JobRecord) -> InlineKeyboardMarkup:
+    action_row = [
+        InlineKeyboardButton("Refresh", callback_data=f"job:refresh:{job.id}"),
+    ]
+    if job.status in ACTIVE_JOB_STATUSES and not job.cancel_requested:
+        action_row.append(InlineKeyboardButton("Cancel", callback_data=f"job:cancel:{job.id}"))
+
+    rows = [action_row]
+    if job.status in RETRYABLE_JOB_STATUSES:
+        rows.append([InlineKeyboardButton("Retry", callback_data=f"job:retry:{job.id}")])
+    if job.normalized_url:
+        rows.append([InlineKeyboardButton("Open source", url=job.normalized_url)])
+    return InlineKeyboardMarkup(rows)
+
+
+def _current_item_for(job: JobRecord, items: list[JobItemRecord]) -> JobItemRecord | None:
+    if not items:
+        return None
+    if job.current_item_index:
+        for item in items:
+            if item.item_index == job.current_item_index:
+                return item
+    for item in items:
+        if item.status in {ItemStatus.DOWNLOADING, ItemStatus.RETAGGING}:
+            return item
+    return None
+
+
+def _format_current_item(item: JobItemRecord) -> str | None:
+    if item.artist and item.title:
+        return f"{item.artist} - {item.title}"
+    return item.title or item.artist or None
+
+
+def _format_progress(percent: float | None) -> str:
+    if percent is None:
+        return "n/a"
+    clamped = max(0.0, min(100.0, percent))
+    filled = round((clamped / 100.0) * PROGRESS_BAR_WIDTH)
+    bar = "#" * filled + "." * (PROGRESS_BAR_WIDTH - filled)
+    return f"[{bar}] {clamped:.1f}%"
+
+
+def _format_eta(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, remaining_seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {remaining_seconds}s"
+    hours, remaining_minutes = divmod(minutes, 60)
+    return f"{hours}h {remaining_minutes}m"
+
+
+def _pretty_status(value: JobStatus | RequestKind) -> str:
+    return str(value).replace("_", " ").title()
+
+
+def _html(value: str) -> str:
+    return escape(value, quote=False)
+
+
+def _truncate(value: str, max_length: int) -> str:
+    if len(value) <= max_length:
+        return value
+    return f"{value[: max_length - 3]}..."
+
+
+def _is_uneditable_message_error(lowered_error: str) -> bool:
+    markers = (
+        "message to edit not found",
+        "message can't be edited",
+        "message identifier is not specified",
+        "message_id_invalid",
+    )
+    return any(marker in lowered_error for marker in markers)
 
 
 def _extract_supported_url(text: str) -> str | None:

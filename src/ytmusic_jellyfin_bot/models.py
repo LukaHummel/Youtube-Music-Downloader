@@ -83,6 +83,7 @@ class JobRecord:
     progress_percent: float | None
     progress_eta_seconds: int | None
     progress_speed: str | None
+    progress_message_id: int | None
     error_message: str | None
     result_summary: str | None
     cancel_requested: bool

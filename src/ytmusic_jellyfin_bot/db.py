@@ -49,6 +49,7 @@ class Database:
                     progress_percent REAL,
                     progress_eta_seconds INTEGER,
                     progress_speed TEXT,
+                    progress_message_id INTEGER,
                     error_message TEXT,
                     result_summary TEXT,
                     cancel_requested INTEGER NOT NULL DEFAULT 0,
@@ -104,14 +105,28 @@ class Database:
                 );
                 """
             )
+            self._migrate_jobs_table(connection)
             connection.execute(
                 """
                 UPDATE jobs
                 SET status = ?, updated_at = CURRENT_TIMESTAMP, error_message = NULL
-                WHERE status IN (?, ?)
+                WHERE status IN (?, ?, ?, ?, ?)
                 """,
-                (JobStatus.QUEUED, JobStatus.DOWNLOADING, JobStatus.RETAGGING),
+                (
+                    JobStatus.QUEUED,
+                    JobStatus.NORMALIZING,
+                    JobStatus.PREFLIGHT,
+                    JobStatus.DOWNLOADING,
+                    JobStatus.RETAGGING,
+                    JobStatus.PLAYLIST_BUILDING,
+                ),
             )
+
+    @staticmethod
+    def _migrate_jobs_table(connection: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(jobs)").fetchall()}
+        if "progress_message_id" not in columns:
+            connection.execute("ALTER TABLE jobs ADD COLUMN progress_message_id INTEGER")
 
     def create_job(
         self,
@@ -395,6 +410,7 @@ class Database:
             progress_percent=row["progress_percent"],
             progress_eta_seconds=row["progress_eta_seconds"],
             progress_speed=row["progress_speed"],
+            progress_message_id=row["progress_message_id"],
             error_message=row["error_message"],
             result_summary=row["result_summary"],
             cancel_requested=bool(row["cancel_requested"]),
