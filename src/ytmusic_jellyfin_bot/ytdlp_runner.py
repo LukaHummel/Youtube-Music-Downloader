@@ -48,16 +48,45 @@ class YtDlpRunner:
         self.config = config
 
     async def preflight(self, url: str, request_kind: RequestKind) -> PreflightResult:
-        command = [*self._preflight_command(), "--dump-single-json", "--skip-download", "--no-warnings", url]
-        LOGGER.info("Running yt-dlp preflight command: %s", _format_command(command))
-        stdout, stderr, returncode = await self._run_capture(command)
-        if returncode != 0:
+        last_error: YtDlpError | None = None
+        for use_cookies in self._preflight_cookie_attempts():
+            command = [
+                *self._preflight_command(use_cookies=use_cookies),
+                "--dump-single-json",
+                "--skip-download",
+                "--no-warnings",
+                url,
+            ]
+            LOGGER.info(
+                "Running yt-dlp preflight command cookies=%s: %s",
+                "enabled" if use_cookies else "disabled",
+                _format_command(command),
+            )
+            stdout, stderr, returncode = await self._run_capture(command)
+            if returncode == 0:
+                return self._parse_preflight_stdout(stdout, stderr, request_kind)
+
             output = stderr or stdout
-            raise YtDlpError(
+            last_error = YtDlpError(
                 self._format_error(output),
                 auth_required=_contains_auth_marker(output),
                 output=output,
             )
+            if not use_cookies and last_error.auth_required and self.config.cookies_available:
+                LOGGER.warning("yt-dlp preflight requires authentication; retrying with cookies")
+                continue
+            raise last_error
+
+        if last_error is not None:
+            raise last_error
+        raise YtDlpError("yt-dlp did not run a preflight attempt.")
+
+    def _parse_preflight_stdout(
+        self,
+        stdout: str,
+        stderr: str,
+        request_kind: RequestKind,
+    ) -> PreflightResult:
         try:
             payload = json.loads(stdout.strip())
         except json.JSONDecodeError as exc:
@@ -152,9 +181,14 @@ class YtDlpRunner:
             output = "\n".join(collected)
             if returncode == 0:
                 break
-            if use_cookies and _contains_format_unavailable_marker(output):
+            needs_cookie_retry = (
+                not use_cookies
+                and self.config.cookies_available
+                and (_contains_auth_marker(output) or _contains_format_unavailable_marker(output))
+            )
+            if needs_cookie_retry:
                 LOGGER.warning(
-                    "yt-dlp reported no usable format with cookies for job_id=%s item_index=%s; retrying without cookies",
+                    "yt-dlp download needs cookies for job_id=%s item_index=%s; retrying with cookies",
                     job_id,
                     item_index,
                 )
@@ -190,9 +224,9 @@ class YtDlpRunner:
         return command
 
     def _download_cookie_attempts(self) -> tuple[bool, ...]:
-        return (True, False) if self.config.cookies_available else (False,)
+        return (False, True) if self.config.cookies_available else (False,)
 
-    def _preflight_command(self) -> list[str]:
+    def _preflight_command(self, *, use_cookies: bool) -> list[str]:
         command = [
             "yt-dlp",
             "--ignore-config",
@@ -200,9 +234,12 @@ class YtDlpRunner:
             YOUTUBE_EXTRACTOR_ARGS,
             "--ignore-no-formats-error",
         ]
-        if self.config.cookies_available:
+        if use_cookies and self.config.cookies_available:
             command.extend(["--cookies", str(self.config.ytdlp_cookies_file)])
         return command
+
+    def _preflight_cookie_attempts(self) -> tuple[bool, ...]:
+        return (False, True) if self.config.cookies_available else (False,)
 
     async def _run_capture(self, command: list[str]) -> tuple[str, str, int]:
         LOGGER.debug("Running yt-dlp command: %s", _format_command(command))

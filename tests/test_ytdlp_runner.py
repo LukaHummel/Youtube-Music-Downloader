@@ -11,18 +11,26 @@ from ytmusic_jellyfin_bot.ytdlp_runner import YtDlpError, YtDlpRunner
 
 
 class FakeYtDlpRunner(YtDlpRunner):
-    def __init__(self, result: tuple[str, str, int]):
+    def __init__(
+        self,
+        result: tuple[str, str, int] | list[tuple[str, str, int]],
+        *,
+        cookies_available: bool = False,
+    ):
         config = SimpleNamespace(
             runtime_ytdlp_config_path=Path("yt-dlp.conf"),
-            cookies_available=False,
+            cookies_available=cookies_available,
+            ytdlp_cookies_file=Path("/run/secrets/youtube_cookies.txt"),
         )
         super().__init__(config)
-        self.result = result
+        self.results = result if isinstance(result, list) else [result]
         self.command: list[str] | None = None
+        self.commands: list[list[str]] = []
 
     async def _run_capture(self, command: list[str]) -> tuple[str, str, int]:
         self.command = command
-        return self.result
+        self.commands.append(command)
+        return self.results.pop(0)
 
 
 class YtDlpRunnerTests(unittest.IsolatedAsyncioTestCase):
@@ -63,6 +71,27 @@ class YtDlpRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(caught.exception.auth_required)
         self.assertEqual(caught.exception.output, output)
+
+    async def test_preflight_retries_with_cookies_only_after_auth_failure(self) -> None:
+        auth_output = "ERROR: [youtube] Private video. Sign in if you've been granted access."
+        payload = {
+            "id": "ADUis5-M15Y",
+            "title": "sma$her & MXZI - ACELERADA | Car Music",
+            "channel": "Niza",
+        }
+        runner = FakeYtDlpRunner(
+            [("", auth_output, 1), (json.dumps(payload), "", 0)],
+            cookies_available=True,
+        )
+
+        result = await runner.preflight(
+            "https://music.youtube.com/watch?v=ADUis5-M15Y",
+            RequestKind.TRACK,
+        )
+
+        self.assertEqual(result.source_id, "ADUis5-M15Y")
+        self.assertNotIn("--cookies", runner.commands[0])
+        self.assertIn("--cookies", runner.commands[1])
 
 
 if __name__ == "__main__":
