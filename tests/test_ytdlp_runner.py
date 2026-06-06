@@ -15,7 +15,7 @@ class FakeYtDlpRunner(YtDlpRunner):
         self,
         result: tuple[str, str, int] | list[tuple[str, str, int]],
         *,
-        cookies_available: bool = False,
+        cookies_available: bool = True,
     ):
         config = SimpleNamespace(
             runtime_ytdlp_config_path=Path("yt-dlp.conf"),
@@ -56,6 +56,7 @@ class YtDlpRunnerTests(unittest.IsolatedAsyncioTestCase):
         assert runner.command is not None
         self.assertIn("--ignore-config", runner.command)
         self.assertIn("--ignore-no-formats-error", runner.command)
+        self.assertIn("--cookies", runner.command)
         self.assertNotIn("--config-locations", runner.command)
         self.assertNotIn("--format", runner.command)
 
@@ -72,26 +73,17 @@ class YtDlpRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(caught.exception.auth_required)
         self.assertEqual(caught.exception.output, output)
 
-    async def test_preflight_retries_with_cookies_only_after_auth_failure(self) -> None:
-        auth_output = "ERROR: [youtube] Private video. Sign in if you've been granted access."
-        payload = {
-            "id": "ADUis5-M15Y",
-            "title": "sma$her & MXZI - ACELERADA | Car Music",
-            "channel": "Niza",
-        }
-        runner = FakeYtDlpRunner(
-            [("", auth_output, 1), (json.dumps(payload), "", 0)],
-            cookies_available=True,
-        )
+    async def test_preflight_requires_cookies_file(self) -> None:
+        runner = FakeYtDlpRunner((json.dumps({}), "", 0), cookies_available=False)
 
-        result = await runner.preflight(
-            "https://music.youtube.com/watch?v=ADUis5-M15Y",
-            RequestKind.TRACK,
-        )
+        with self.assertRaises(YtDlpError) as caught:
+            await runner.preflight(
+                "https://music.youtube.com/watch?v=ADUis5-M15Y",
+                RequestKind.TRACK,
+            )
 
-        self.assertEqual(result.source_id, "ADUis5-M15Y")
-        self.assertNotIn("--cookies", runner.commands[0])
-        self.assertIn("--cookies", runner.commands[1])
+        self.assertTrue(caught.exception.auth_required)
+        self.assertIn("Required cookies.txt file", str(caught.exception))
 
 
 if __name__ == "__main__":
