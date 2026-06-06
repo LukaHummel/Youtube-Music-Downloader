@@ -175,9 +175,10 @@ class JobWorker:
 
             source_key = self.db.source_key_for_video(item.youtube_video_id or "")
             mapping = self.db.find_source_mapping(source_key)
-            if mapping and Path(mapping["final_path"]).exists():
+            mapped_final_path = self._library_path_from_value(mapping["final_path"]) if mapping else None
+            if mapped_final_path and mapped_final_path.exists():
                 duplicate_count += 1
-                final_path = Path(mapping["final_path"])
+                final_path = mapped_final_path
                 self.beets.write_baseline_tags(final_path, self._load_metadata(item, None), overwrite=False)
                 LOGGER.info(
                     "Job #%s item %s skipped existing file: video_id=%s path=%s",
@@ -403,6 +404,12 @@ class JobWorker:
         for item in self.db.get_job_items(job_id):
             if item.status is ItemStatus.PENDING:
                 self.db.update_job_item(item.id, status=ItemStatus.CANCELLED)
+
+    def _library_path_from_value(self, value: str) -> Path:
+        path = Path(value)
+        if path.is_absolute():
+            return path
+        return self.config.music_library_dir / path
 
     async def _notify(self, chat_id: int, message: str, job_id: int | None) -> None:
         self.db.add_message(direction="outgoing", body=message, job_id=job_id, telegram_chat_id=chat_id)

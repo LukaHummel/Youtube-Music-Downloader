@@ -10,6 +10,7 @@ from ytmusic_jellyfin_bot.db import Database
 from ytmusic_jellyfin_bot.models import (
     DownloadResult,
     ImportResult,
+    ItemStatus,
     PreflightItem,
     PreflightResult,
     RequestKind,
@@ -20,6 +21,7 @@ from ytmusic_jellyfin_bot.worker import JobWorker
 class FakeYtDlp:
     def __init__(self, audio_path: Path):
         self.audio_path = audio_path
+        self.download_called = False
 
     async def preflight(self, url: str, request_kind: RequestKind) -> PreflightResult:
         return PreflightResult(
@@ -42,6 +44,7 @@ class FakeYtDlp:
         )
 
     async def download_track(self, **kwargs) -> DownloadResult:
+        self.download_called = True
         return DownloadResult(audio_path=self.audio_path, info_json_path=None)
 
 
@@ -75,13 +78,14 @@ class FakeYtMusic:
 class FakeBeets:
     def __init__(self):
         self.imported_metadata = None
+        self.baseline_writes = []
 
     async def import_track(self, audio_path: Path, metadata: dict) -> ImportResult:
         self.imported_metadata = metadata
         return ImportResult(status="imported", final_path=audio_path)
 
     def write_baseline_tags(self, audio_path: Path, metadata: dict, *, overwrite: bool) -> None:
-        pass
+        self.baseline_writes.append((audio_path, metadata, overwrite))
 
 
 class FakePlaylistWriter:
@@ -122,6 +126,53 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(item.album, "Enriched Album")
             self.assertEqual(beets.imported_metadata["track"], "Enriched Title")
             self.assertEqual(beets.imported_metadata["artist"], "Enriched Artist")
+
+    async def test_existing_relative_source_mapping_resolves_under_music_library(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            temp_path = Path(tempdir)
+            music_library_dir = temp_path / "music"
+            relative_path = Path("Enriched Artist") / "Enriched Album" / "Enriched Title.m4a"
+            final_path = music_library_dir / relative_path
+            final_path.parent.mkdir(parents=True)
+            final_path.write_bytes(b"placeholder")
+            db = Database(temp_path / "app.db")
+            job = db.create_job(
+                source_url="https://music.youtube.com/watch?v=video",
+                normalized_url="https://music.youtube.com/watch?v=video",
+                request_kind=RequestKind.TRACK,
+                chat_id=1,
+                user_id=2,
+                requested_by="tester",
+                source_id="video",
+            )
+            db.upsert_source_mapping(
+                source_key=db.source_key_for_video("video"),
+                youtube_video_id="video",
+                playlist_item_id=None,
+                final_path=str(relative_path),
+                mb_trackid=None,
+                artist="Enriched Artist",
+                album="Enriched Album",
+                title="Enriched Title",
+            )
+            ytdlp = FakeYtDlp(temp_path / "download.m4a")
+            beets = FakeBeets()
+            worker = JobWorker(
+                config=SimpleNamespace(music_library_dir=music_library_dir),
+                db=db,
+                ytdlp=ytdlp,
+                beets=beets,
+                playlist_writer=FakePlaylistWriter(),
+                ytmusic=FakeYtMusic(),
+            )
+
+            await worker._process_job(job)
+
+            item = db.get_job_items(job.id)[0]
+            self.assertFalse(ytdlp.download_called)
+            self.assertEqual(item.status, ItemStatus.SKIPPED_EXISTING)
+            self.assertEqual(item.final_path, str(final_path))
+            self.assertEqual(beets.baseline_writes[0][0], final_path)
 
 
 if __name__ == "__main__":

@@ -4,8 +4,9 @@ import asyncio
 import logging
 import shlex
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import requests
 from mediafile import FileTypeError, Image, MediaFile, MutagenError, UnreadableFileError
@@ -66,7 +67,7 @@ class BeetsRunner:
     def write_baseline_tags(self, audio_path: Path, metadata: dict[str, Any], *, overwrite: bool) -> None:
         values = tag_values_from_metadata(metadata)
         if not values:
-            LOGGER.warning("No fallback metadata was available before beets import: path=%s", audio_path)
+            LOGGER.warning("No fallback metadata was available: path=%s", audio_path)
             return
         artwork_url = values.pop("artwork_url", None)
         try:
@@ -95,7 +96,7 @@ class BeetsRunner:
             media.save()
         except (FileTypeError, MutagenError, UnreadableFileError) as exc:
             LOGGER.warning(
-                "Could not write fallback metadata before beets import: path=%s error=%s",
+                "Could not write fallback metadata: path=%s error=%s",
                 audio_path,
                 exc,
             )
@@ -116,7 +117,7 @@ class BeetsRunner:
                     (mb_trackid,),
                 ).fetchall()
                 if len(rows) == 1:
-                    return _path_from_value(rows[0]["path"]), "mb_trackid"
+                    return _library_path_from_value(rows[0]["path"], self.config.music_library_dir), "mb_trackid"
                 if len(rows) > 1:
                     return None, "ambiguous"
 
@@ -134,17 +135,21 @@ class BeetsRunner:
                 (title, artist, album),
             ).fetchall()
         if len(rows) == 1:
-            return _path_from_value(rows[0]["path"]), "metadata"
+            return _library_path_from_value(rows[0]["path"], self.config.music_library_dir), "metadata"
         if len(rows) > 1:
             return None, "ambiguous"
         return None, None
 
-    def _connect_library(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect_library(self) -> Iterator[sqlite3.Connection]:
         self.config.beets_library_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.config.beets_library_path)
         connection.row_factory = sqlite3.Row
         connection.text_factory = lambda value: value.decode("utf-8", errors="replace")
-        return connection
+        try:
+            yield connection
+        finally:
+            connection.close()
 
     def _get_max_item_id(self) -> int:
         if not self.config.beets_library_path.exists():
@@ -161,7 +166,7 @@ class BeetsRunner:
                 "SELECT path FROM items WHERE id > ? ORDER BY id DESC LIMIT 1",
                 (max_id_before,),
             ).fetchone()
-        return _path_from_value(row["path"]) if row else None
+        return _library_path_from_value(row["path"], self.config.music_library_dir) if row else None
 
 
 def _normalize_text(value: Any) -> str | None:
@@ -175,6 +180,13 @@ def _path_from_value(value: Any) -> Path:
     if isinstance(value, bytes):
         return Path(value.decode("utf-8", errors="replace"))
     return Path(str(value))
+
+
+def _library_path_from_value(value: Any, music_library_dir: Path) -> Path:
+    path = _path_from_value(value)
+    if path.is_absolute():
+        return path
+    return music_library_dir / path
 
 
 def _missing_tag_value(value: Any) -> bool:
