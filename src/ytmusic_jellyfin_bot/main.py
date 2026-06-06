@@ -18,7 +18,20 @@ from .playlist_writer import PlaylistWriter
 from .worker import JobWorker
 from .ytdlp_runner import YtDlpRunner
 
-DEPENDENCY_VERSION_PACKAGES = ("yt-dlp", "yt-dlp-ejs", "beets", "python-telegram-bot")
+DEPENDENCY_VERSION_PACKAGES = (
+    "yt-dlp",
+    "yt-dlp-ejs",
+    "curl-cffi",
+    "brotli",
+    "certifi",
+    "mutagen",
+    "pycryptodomex",
+    "requests",
+    "urllib3",
+    "websockets",
+    "beets",
+    "python-telegram-bot",
+)
 EXTERNAL_LOGGERS = ("telegram", "httpx", "httpcore")
 PLAIN_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 COLOR_LOG_FORMAT = "%(asctime)s %(colored_level)s %(name)s: %(message)s"
@@ -67,7 +80,13 @@ def main() -> None:
         config.template_config_dir,
     )
     logger.info("Dependency versions: %s", _dependency_versions())
-    logger.info("YouTube extraction support: deno=%s", _command_version("deno", "--version"))
+    logger.info(
+        "yt-dlp binary dependencies: ffmpeg=%s ffprobe=%s deno=%s atomicparsley=%s",
+        _command_version("ffmpeg", "-version"),
+        _command_version("ffprobe", "-version"),
+        _command_version("deno", "--version"),
+        _command_version("AtomicParsley", "--version"),
+    )
     logger.info(
         "Runtime paths: music=%s staging=%s state=%s cookies=%s",
         config.music_library_dir,

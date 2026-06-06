@@ -9,7 +9,7 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg unzip \
+    && apt-get install -y --no-install-recommends atomicparsley ca-certificates curl ffmpeg unzip \
     && arch="$(dpkg --print-architecture)" \
     && case "$arch" in \
         amd64) deno_arch="x86_64-unknown-linux-gnu" ;; \
@@ -26,6 +26,11 @@ COPY pyproject.toml README.md /app/
 COPY config /app/config
 COPY src /app/src
 
-RUN pip install .
+RUN pip install . \
+    && command -v yt-dlp \
+    && command -v ffmpeg \
+    && command -v ffprobe \
+    && command -v deno \
+    && command -v AtomicParsley
 
 CMD ["python", "-m", "ytmusic_jellyfin_bot"]

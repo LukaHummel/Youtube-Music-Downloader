@@ -20,7 +20,11 @@ class MainTests(unittest.TestCase):
 
         self.assertEqual(
             versions,
-            "yt-dlp=yt-dlp-version yt-dlp-ejs=yt-dlp-ejs-version beets=not installed "
+            "yt-dlp=yt-dlp-version yt-dlp-ejs=yt-dlp-ejs-version "
+            "curl-cffi=curl-cffi-version brotli=brotli-version certifi=certifi-version "
+            "mutagen=mutagen-version pycryptodomex=pycryptodomex-version "
+            "requests=requests-version urllib3=urllib3-version websockets=websockets-version "
+            "beets=not installed "
             "python-telegram-bot=python-telegram-bot-version",
         )
 

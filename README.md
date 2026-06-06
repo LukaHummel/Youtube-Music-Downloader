@@ -47,7 +47,7 @@ pip install -e .
 python -m ytmusic_jellyfin_bot
 ```
 
-The runtime expects `yt-dlp`, `yt-dlp-ejs`, `beet`, `ffmpeg`, and a supported YouTube JavaScript runtime to be available. The Docker image installs them automatically.
+The runtime expects `yt-dlp`, `yt-dlp-ejs`, `beet`, `ffmpeg`/`ffprobe`, a supported YouTube JavaScript runtime, and the yt-dlp networking/metadata extras to be available. The Docker image installs Deno, AtomicParsley, ffmpeg/ffprobe, and `yt-dlp[default,curl-cffi]` automatically.
 
 ## Container Image
 
