@@ -26,6 +26,10 @@ class NormalizerTests(unittest.TestCase):
         result = normalize_url("https://youtu.be/abc123")
         self.assertEqual(result.normalized_url, "https://music.youtube.com/watch?v=abc123")
 
+    def test_mobile_url_is_normalized(self) -> None:
+        result = normalize_url("https://m.youtube.com/watch?v=abc123")
+        self.assertEqual(result.normalized_url, "https://music.youtube.com/watch?v=abc123")
+
     def test_invalid_host_is_rejected(self) -> None:
         with self.assertRaises(NormalizationError):
             normalize_url("https://example.com/watch?v=abc123")

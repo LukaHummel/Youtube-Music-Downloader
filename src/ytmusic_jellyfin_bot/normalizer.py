@@ -5,7 +5,14 @@ from urllib.parse import parse_qs, urlparse
 from .models import NormalizedRequest, RequestKind
 
 
-SUPPORTED_HOSTS = {"youtube.com", "www.youtube.com", "music.youtube.com", "youtu.be"}
+SUPPORTED_HOSTS = {
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+    "www.music.youtube.com",
+    "youtu.be",
+}
 
 
 class NormalizationError(ValueError):

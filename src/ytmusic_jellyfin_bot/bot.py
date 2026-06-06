@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from telegram import Chat, Message, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
@@ -12,6 +13,15 @@ from .normalizer import NormalizationError, normalize_url
 from .worker import JobWorker
 
 LOGGER = logging.getLogger(__name__)
+YOUTUBE_URL_RE = re.compile(
+    r"(?P<url>"
+    r"(?:https?://)?"
+    r"(?:(?:www\.|m\.)?youtube\.com|(?:www\.)?music\.youtube\.com|youtu\.be)"
+    r"/[^\s<>()\[\]{}]+"
+    r")",
+    re.IGNORECASE,
+)
+TRAILING_URL_PUNCTUATION = ".,;:!?\"'"
 
 
 class TelegramBotService:
@@ -45,7 +55,8 @@ class TelegramBotService:
         application.add_handler(CommandHandler("jobs", self.jobs_command))
         application.add_handler(CommandHandler("retry", self.retry_command))
         application.add_handler(CommandHandler("cancel", self.cancel_command))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.text_message))
+        plain_url_filter = (filters.TEXT | filters.CAPTION) & ~filters.COMMAND
+        application.add_handler(MessageHandler(plain_url_filter, self.text_message))
         self.application = application
         return application
 
@@ -88,11 +99,12 @@ class TelegramBotService:
         if not await self._ensure_allowed(update):
             return
         message = self._require_message(update)
-        text = (message.text or "").strip()
-        if "youtube.com" not in text and "youtu.be" not in text and "music.youtube.com" not in text:
+        text = (message.text or message.caption or "").strip()
+        url = _extract_supported_url(text)
+        if url is None:
             await message.reply_text("Send a YouTube or YouTube Music URL.")
             return
-        await self._submit_job(update, text, None)
+        await self._submit_job(update, url, None)
 
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._ensure_allowed(update):
@@ -236,7 +248,7 @@ class TelegramBotService:
         )
         self.db.add_message(
             direction="incoming",
-            body=message.text or raw_url,
+            body=message.text or message.caption or raw_url,
             job_id=job.id,
             telegram_chat_id=chat_id,
             telegram_user_id=user.id if user else None,
@@ -287,3 +299,13 @@ class TelegramBotService:
         if chat is None:
             raise ValueError("Telegram update does not include a chat.")
         return chat
+
+
+def _extract_supported_url(text: str) -> str | None:
+    match = YOUTUBE_URL_RE.search(text)
+    if match is None:
+        return None
+    url = match.group("url").rstrip(TRAILING_URL_PUNCTUATION)
+    if not url.lower().startswith(("http://", "https://")):
+        url = f"https://{url}"
+    return url
