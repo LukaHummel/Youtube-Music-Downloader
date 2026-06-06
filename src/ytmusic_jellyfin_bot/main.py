@@ -52,7 +52,7 @@ def main() -> None:
         "available" if config.cookies_available else "not available",
     )
     logging.getLogger(__name__).info(
-        "yt-dlp runtime config=%s config_format=%s enforced_format=%s preflight_config=ignored",
+        "yt-dlp runtime config=%s config_format=%s enforced_format=%s preflight_config=ignored preflight_formats=ignored",
         config.runtime_ytdlp_config_path,
         _find_config_format(config.runtime_ytdlp_config_path),
         DEFAULT_FORMAT_SELECTOR,

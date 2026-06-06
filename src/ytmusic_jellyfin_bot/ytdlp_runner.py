@@ -29,6 +29,11 @@ AUTH_ERROR_MARKERS = (
 )
 PROGRESS_RE = re.compile(r"^download:(?P<percent>[^|]*)\|(?P<speed>[^|]*)\|(?P<eta>[^|]*)\|")
 AUDIO_SUFFIXES = {".aac", ".m4a", ".mp3", ".opus", ".flac", ".wav", ".ogg", ".alac"}
+FORMAT_UNAVAILABLE_MARKERS = (
+    "requested format is not available",
+    "no video formats found",
+    "no formats found",
+)
 
 
 class YtDlpError(RuntimeError):
@@ -97,58 +102,70 @@ class YtDlpRunner:
     ) -> DownloadResult:
         item_dir = self.config.staging_dir / str(job_id) / f"{item_index:04d}"
         item_dir.mkdir(parents=True, exist_ok=True)
-        command = [
-            *self._base_command(),
-            "--format",
-            DEFAULT_FORMAT_SELECTOR,
-            "--download-archive",
-            str(self.config.ytdlp_archive_path),
-            "--newline",
-            "--progress-template",
-            "download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(info.id)s|%(info.title)s",
-            "--paths",
-            str(item_dir),
-            "--output",
-            "%(album,artist,playlist_title,creator)s/%(track,title)s.%(ext)s",
-            url,
-        ]
-        LOGGER.debug(
-            "Running yt-dlp download command for job_id=%s item_index=%s: %s",
-            job_id,
-            item_index,
-            _format_command(command),
-        )
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        assert process.stdout is not None
-        collected: list[str] = []
-        while True:
-            line = await process.stdout.readline()
-            if not line:
-                break
-            text = line.decode("utf-8", errors="replace").strip()
-            if not text:
-                continue
-            collected.append(text)
-            LOGGER.debug("yt-dlp job_id=%s item_index=%s output: %s", job_id, item_index, text)
-            match = PROGRESS_RE.match(text)
-            if match:
-                await progress_callback(
-                    _parse_percent(match.group("percent")),
-                    _parse_eta(match.group("eta")),
-                    _clean_progress_value(match.group("speed")),
-                )
-        returncode = await process.wait()
-        if returncode != 0:
+        for use_cookies in self._download_cookie_attempts():
+            command = [
+                *self._base_command(use_cookies=use_cookies),
+                "--format",
+                DEFAULT_FORMAT_SELECTOR,
+                "--download-archive",
+                str(self.config.ytdlp_archive_path),
+                "--newline",
+                "--progress-template",
+                "download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(info.id)s|%(info.title)s",
+                "--paths",
+                str(item_dir),
+                "--output",
+                "%(album,artist,playlist_title,creator)s/%(track,title)s.%(ext)s",
+                url,
+            ]
+            LOGGER.info(
+                "Running yt-dlp download command for job_id=%s item_index=%s cookies=%s: %s",
+                job_id,
+                item_index,
+                "enabled" if use_cookies else "disabled",
+                _format_command(command),
+            )
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            assert process.stdout is not None
+            collected: list[str] = []
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").strip()
+                if not text:
+                    continue
+                collected.append(text)
+                LOGGER.debug("yt-dlp job_id=%s item_index=%s output: %s", job_id, item_index, text)
+                match = PROGRESS_RE.match(text)
+                if match:
+                    await progress_callback(
+                        _parse_percent(match.group("percent")),
+                        _parse_eta(match.group("eta")),
+                        _clean_progress_value(match.group("speed")),
+                    )
+            returncode = await process.wait()
             output = "\n".join(collected)
+            if returncode == 0:
+                break
+            if use_cookies and _contains_format_unavailable_marker(output):
+                LOGGER.warning(
+                    "yt-dlp reported no usable format with cookies for job_id=%s item_index=%s; retrying without cookies",
+                    job_id,
+                    item_index,
+                )
+                continue
             raise YtDlpError(
                 self._format_error(output),
                 auth_required=_contains_auth_marker(output),
                 output=output,
             )
+        else:
+            raise YtDlpError("yt-dlp did not run a download attempt.")
 
         audio_candidates = sorted(
             (
@@ -166,11 +183,14 @@ class YtDlpRunner:
         info_json_path = next((path for path in item_dir.rglob("*.info.json") if path.is_file()), None)
         return DownloadResult(audio_path=audio_candidates[0], info_json_path=info_json_path)
 
-    def _base_command(self) -> list[str]:
+    def _base_command(self, *, use_cookies: bool = True) -> list[str]:
         command = ["yt-dlp", "--config-locations", str(self.config.runtime_ytdlp_config_path)]
-        if self.config.cookies_available:
+        if use_cookies and self.config.cookies_available:
             command.extend(["--cookies", str(self.config.ytdlp_cookies_file)])
         return command
+
+    def _download_cookie_attempts(self) -> tuple[bool, ...]:
+        return (True, False) if self.config.cookies_available else (False,)
 
     def _preflight_command(self) -> list[str]:
         command = [
@@ -178,8 +198,7 @@ class YtDlpRunner:
             "--ignore-config",
             "--extractor-args",
             YOUTUBE_EXTRACTOR_ARGS,
-            "--format",
-            DEFAULT_FORMAT_SELECTOR,
+            "--ignore-no-formats-error",
         ]
         if self.config.cookies_available:
             command.extend(["--cookies", str(self.config.ytdlp_cookies_file)])
@@ -268,6 +287,11 @@ def _coalesce_artist(payload: dict[str, Any]) -> str | None:
 def _contains_auth_marker(output: str) -> bool:
     lowered = output.lower()
     return any(marker in lowered for marker in AUTH_ERROR_MARKERS)
+
+
+def _contains_format_unavailable_marker(output: str) -> bool:
+    lowered = output.lower()
+    return any(marker in lowered for marker in FORMAT_UNAVAILABLE_MARKERS)
 
 
 def _format_command(command: list[str]) -> str:
