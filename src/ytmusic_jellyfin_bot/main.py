@@ -17,6 +17,8 @@ from .db import Database
 from .playlist_writer import PlaylistWriter
 from .worker import JobWorker
 from .ytdlp_runner import YtDlpRunner
+from .ytmusic_auth import YtMusicAuthManager
+from .ytmusic_metadata import YtMusicMetadataProvider
 
 DEPENDENCY_VERSION_PACKAGES = (
     "yt-dlp",
@@ -30,6 +32,7 @@ DEPENDENCY_VERSION_PACKAGES = (
     "urllib3",
     "websockets",
     "beets",
+    "ytmusicapi",
     "python-telegram-bot",
 )
 EXTERNAL_LOGGERS = ("telegram", "httpx", "httpcore")
@@ -102,6 +105,19 @@ def main() -> None:
         ",".join(config.youtube_player_clients),
         bool(config.youtube_extractor_args),
     )
+    logger.info(
+        "ytmusic metadata: enabled=%s oauth_client_credentials=%s oauth_file=%s oauth_file_exists=%s "
+        "language=%s location=%s fetch_lyrics=%s fetch_credits=%s embed_artwork=%s",
+        config.ytmusic_metadata_enabled,
+        bool(config.ytmusic_oauth_client_id and config.ytmusic_oauth_client_secret),
+        config.ytmusic_oauth_file,
+        config.ytmusic_oauth_file.is_file(),
+        config.ytmusic_language,
+        config.ytmusic_location or "default",
+        config.ytmusic_fetch_lyrics,
+        config.ytmusic_fetch_credits,
+        config.ytmusic_embed_artwork,
+    )
     if not config.cookies_available:
         logger.warning(
             "Cookies file is not mounted or readable at %s; private, age-restricted, and bot-check gated "
@@ -109,14 +125,23 @@ def main() -> None:
             config.ytdlp_cookies_file,
         )
     db = Database(config.db_path)
+    ytmusic_auth = YtMusicAuthManager(config)
+    ytmusic_metadata = YtMusicMetadataProvider(config, ytmusic_auth)
     worker = JobWorker(
         config=config,
         db=db,
         ytdlp=YtDlpRunner(config),
         beets=BeetsRunner(config),
         playlist_writer=PlaylistWriter(config),
+        ytmusic=ytmusic_metadata,
     )
-    bot = TelegramBotService(config=config, db=db, worker=worker)
+    bot = TelegramBotService(
+        config=config,
+        db=db,
+        worker=worker,
+        ytmusic_auth=ytmusic_auth,
+        ytmusic_metadata=ytmusic_metadata,
+    )
     application = bot.build()
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,

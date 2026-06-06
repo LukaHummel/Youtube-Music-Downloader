@@ -25,6 +25,7 @@ class MainTests(unittest.TestCase):
             "mutagen=mutagen-version pycryptodomex=pycryptodomex-version "
             "requests=requests-version urllib3=urllib3-version websockets=websockets-version "
             "beets=not installed "
+            "ytmusicapi=ytmusicapi-version "
             "python-telegram-bot=python-telegram-bot-version",
         )
 

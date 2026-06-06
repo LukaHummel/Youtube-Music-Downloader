@@ -9,3 +9,4 @@ services:
       - /srv/ytmusic/downloads:/downloads
       - /srv/ytmusic/data:/data
       - /srv/ytmusic/secrets/youtube_cookies.txt:/run/secrets/youtube_cookies.txt:ro
+      # oauth.json is written under /data/ytmusic by the /ytmusic_auth Telegram command.

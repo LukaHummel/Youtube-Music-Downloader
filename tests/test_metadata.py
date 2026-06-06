@@ -61,6 +61,33 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(parse_artist_title("Artist – Track"), ("Artist", "Track"))
         self.assertEqual(parse_artist_title("Artist — Track"), ("Artist", "Track"))
 
+    def test_tag_values_include_enriched_ytmusic_fields(self) -> None:
+        tags = tag_values_from_metadata(
+            {
+                "track": "Song",
+                "artist": "Artist",
+                "artists": ["Artist", "Guest"],
+                "album": "Album",
+                "albumartist": "Album Artist",
+                "albumartists": ["Album Artist"],
+                "year": "2026",
+                "track_number": "2",
+                "track_total": "10",
+                "lyrics": "Line 1\nLine 2",
+                "composer": "Writer",
+                "composers": ["Writer", "Co Writer"],
+                "ytmusic_artwork_url": "https://example.com/cover.jpg",
+            }
+        )
+
+        self.assertEqual(tags["artists"], ["Artist", "Guest"])
+        self.assertEqual(tags["albumartists"], ["Album Artist"])
+        self.assertEqual(tags["tracktotal"], 10)
+        self.assertEqual(tags["lyrics"], "Line 1\nLine 2")
+        self.assertEqual(tags["composer"], "Writer")
+        self.assertEqual(tags["composers"], ["Writer", "Co Writer"])
+        self.assertEqual(tags["artwork_url"], "https://example.com/cover.jpg")
+
 
 if __name__ == "__main__":
     unittest.main()

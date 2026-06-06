@@ -14,6 +14,7 @@ from .metadata import normalize_track_metadata
 from .models import ItemStatus, JobItemRecord, JobRecord, JobStatus, RequestKind
 from .playlist_writer import PlaylistWriter
 from .ytdlp_runner import YtDlpError, YtDlpRunner
+from .ytmusic_metadata import YtMusicMetadataProvider
 
 Notifier = Callable[[int, str, int | None], Awaitable[None]]
 
@@ -30,12 +31,14 @@ class JobWorker:
         ytdlp: YtDlpRunner,
         beets: BeetsRunner,
         playlist_writer: PlaylistWriter,
+        ytmusic: YtMusicMetadataProvider | None = None,
     ):
         self.config = config
         self.db = db
         self.ytdlp = ytdlp
         self.beets = beets
         self.playlist_writer = playlist_writer
+        self.ytmusic = ytmusic
         self._task: asyncio.Task[None] | None = None
         self._wake_event = asyncio.Event()
         self._stopping = False
@@ -131,6 +134,9 @@ class JobWorker:
             )
             await self._notify(job.chat_id, f"Job #{job.id} failed during preflight.\n{message}", job.id)
             return
+
+        if self.ytmusic:
+            preflight = await self.ytmusic.enrich_preflight(preflight)
 
         self.db.replace_job_items(job.id, preflight.items)
         LOGGER.info(
@@ -305,6 +311,7 @@ class JobWorker:
                     album=album,
                     title=title,
                 )
+                self.beets.write_baseline_tags(final_path, metadata, overwrite=False)
                 track_paths.append(final_path)
                 continue
 

@@ -11,6 +11,8 @@ from .db import Database
 from .models import JobStatus, RequestKind
 from .normalizer import NormalizationError, normalize_url
 from .worker import JobWorker
+from .ytmusic_auth import YtMusicAuthManager, YtMusicAuthStartStatus
+from .ytmusic_metadata import YtMusicMetadataProvider
 
 LOGGER = logging.getLogger(__name__)
 YOUTUBE_URL_RE = re.compile(
@@ -25,10 +27,20 @@ TRAILING_URL_PUNCTUATION = ".,;:!?\"'"
 
 
 class TelegramBotService:
-    def __init__(self, *, config: AppConfig, db: Database, worker: JobWorker):
+    def __init__(
+        self,
+        *,
+        config: AppConfig,
+        db: Database,
+        worker: JobWorker,
+        ytmusic_auth: YtMusicAuthManager | None = None,
+        ytmusic_metadata: YtMusicMetadataProvider | None = None,
+    ):
         self.config = config
         self.db = db
         self.worker = worker
+        self.ytmusic_auth = ytmusic_auth
+        self.ytmusic_metadata = ytmusic_metadata
         self.application: Application | None = None
 
     def build(self) -> Application:
@@ -55,6 +67,9 @@ class TelegramBotService:
         application.add_handler(CommandHandler("jobs", self.jobs_command))
         application.add_handler(CommandHandler("retry", self.retry_command))
         application.add_handler(CommandHandler("cancel", self.cancel_command))
+        application.add_handler(CommandHandler("ytmusic_auth", self.ytmusic_auth_command))
+        application.add_handler(CommandHandler("ytmusic_auth_status", self.ytmusic_auth_status_command))
+        application.add_handler(CommandHandler("ytmusic_auth_reset", self.ytmusic_auth_reset_command))
         plain_url_filter = (filters.TEXT | filters.CAPTION) & ~filters.COMMAND
         application.add_handler(MessageHandler(plain_url_filter, self.text_message))
         self.application = application
@@ -84,7 +99,10 @@ class TelegramBotService:
             "/status <job_id> shows one job.\n"
             "/jobs lists recent jobs.\n"
             "/retry <job_id> requeues a failed, partial, or cancelled job.\n"
-            "/cancel <job_id> cancels a queued job or requests cancellation for the active one.\n\n"
+            "/cancel <job_id> cancels a queued job or requests cancellation for the active one.\n"
+            "/ytmusic_auth starts YouTube Music OAuth metadata setup.\n"
+            "/ytmusic_auth_status shows YouTube Music OAuth metadata status.\n"
+            "/ytmusic_auth_reset removes the saved YouTube Music OAuth token.\n\n"
             "Private playlists require a valid mounted cookies.txt file."
         )
         await message.reply_text(text)
@@ -207,6 +225,66 @@ class TelegramBotService:
             return
         self.db.mark_cancel_requested(job_id)
         await message.reply_text(f"Cancellation requested for job #{job_id}.")
+
+    async def ytmusic_auth_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._ensure_allowed(update):
+            return
+        message = self._require_message(update)
+        chat = self._require_chat(update)
+        if not self.ytmusic_auth:
+            await message.reply_text("YouTube Music metadata authentication is not configured.")
+            return
+
+        result = await self.ytmusic_auth.start_auth_flow(
+            lambda body: self._complete_ytmusic_auth(chat.id, body)
+        )
+        if result.status is YtMusicAuthStartStatus.DISABLED:
+            await message.reply_text("YouTube Music metadata enrichment is disabled.")
+            return
+        if result.status is YtMusicAuthStartStatus.MISSING_CLIENT_CREDENTIALS:
+            await message.reply_text(
+                "YouTube Music OAuth is missing client credentials. Set "
+                "YTMUSIC_OAUTH_CLIENT_ID and YTMUSIC_OAUTH_CLIENT_SECRET."
+            )
+            return
+        assert result.flow is not None
+        prefix = (
+            "YouTube Music OAuth is already in progress."
+            if result.status is YtMusicAuthStartStatus.ALREADY_IN_PROGRESS
+            else "Started YouTube Music OAuth setup."
+        )
+        await message.reply_text(
+            f"{prefix}\n"
+            f"Open: {result.flow.verification_url_with_code}\n"
+            f"Code: {result.flow.user_code}\n"
+            f"Expires in: {result.flow.remaining_seconds}s"
+        )
+
+    async def ytmusic_auth_status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._ensure_allowed(update):
+            return
+        message = self._require_message(update)
+        if not self.ytmusic_auth:
+            await message.reply_text("YouTube Music OAuth status: disabled")
+            return
+        await message.reply_text(f"YouTube Music OAuth status: {self.ytmusic_auth.status()}")
+
+    async def ytmusic_auth_reset_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._ensure_allowed(update):
+            return
+        message = self._require_message(update)
+        if not self.ytmusic_auth:
+            await message.reply_text("YouTube Music metadata authentication is not configured.")
+            return
+        await self.ytmusic_auth.reset()
+        if self.ytmusic_metadata:
+            self.ytmusic_metadata.clear_client_cache()
+        await message.reply_text("YouTube Music OAuth token reset.")
+
+    async def _complete_ytmusic_auth(self, chat_id: int, body: str) -> None:
+        if self.ytmusic_metadata:
+            self.ytmusic_metadata.clear_client_cache()
+        await self.send_notification(chat_id, body, None)
 
     async def _submit_from_command(
         self,

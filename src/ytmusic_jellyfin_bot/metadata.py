@@ -44,29 +44,50 @@ def normalize_track_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def tag_values_from_metadata(metadata: Mapping[str, Any]) -> dict[str, str | int]:
+def tag_values_from_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
     normalized = normalize_track_metadata(metadata)
-    values: dict[str, str | int] = {}
+    values: dict[str, Any] = {}
 
     title = _text(normalized.get("track") or normalized.get("title"))
     artist = _text(normalized.get("artist") or normalized.get("albumartist") or normalized.get("creator"))
+    artists = _text_list(normalized.get("artists"))
     album = _text(normalized.get("album"))
     albumartist = _text(normalized.get("albumartist") or artist)
+    albumartists = _text_list(normalized.get("albumartists"))
     year = _year_from_metadata(normalized)
     track_number = _positive_int(normalized.get("track_number") or normalized.get("playlist_index"))
+    track_total = _positive_int(normalized.get("track_total") or normalized.get("tracktotal"))
+    lyrics = _text(normalized.get("lyrics"))
+    composer = _text(normalized.get("composer"))
+    composers = _text_list(normalized.get("composers"))
+    artwork_url = _text(normalized.get("ytmusic_artwork_url"))
 
     if title:
         values["title"] = title
     if artist:
         values["artist"] = artist
+    if artists:
+        values["artists"] = artists
     if album:
         values["album"] = album
     if albumartist:
         values["albumartist"] = albumartist
+    if albumartists:
+        values["albumartists"] = albumartists
     if year:
         values["year"] = year
     if track_number:
         values["track"] = track_number
+    if track_total:
+        values["tracktotal"] = track_total
+    if lyrics:
+        values["lyrics"] = lyrics
+    if composer:
+        values["composer"] = composer
+    if composers:
+        values["composers"] = composers
+    if artwork_url:
+        values["artwork_url"] = artwork_url
     return values
 
 
@@ -92,19 +113,25 @@ def clean_track_title(title: str) -> str:
 
 
 def _artists_list_text(value: Any) -> str | None:
-    if not isinstance(value, list):
-        return None
-    names: list[str] = []
-    for artist in value:
-        if isinstance(artist, dict):
-            name = _text(artist.get("name"))
-            if name:
-                names.append(name)
-        else:
-            name = _text(artist)
-            if name:
-                names.append(name)
+    names = _text_list(value)
     return ", ".join(names) if names else None
+
+
+def _text_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        text = _text(value)
+        return [text] if text else []
+    if not isinstance(value, list):
+        return []
+    names: list[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            name = _text(item.get("name"))
+        else:
+            name = _text(item)
+        if name:
+            names.append(name)
+    return names
 
 
 def _year_from_metadata(metadata: Mapping[str, Any]) -> int | None:

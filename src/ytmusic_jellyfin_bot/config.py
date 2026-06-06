@@ -105,6 +105,16 @@ class AppConfig:
     color_logs: bool
     youtube_player_clients: tuple[str, ...]
     youtube_extractor_args: str | None
+    ytmusic_metadata_enabled: bool
+    ytmusic_oauth_client_id: str | None
+    ytmusic_oauth_client_secret: str | None
+    ytmusic_oauth_file: Path
+    ytmusic_language: str
+    ytmusic_location: str
+    ytmusic_request_timeout: float
+    ytmusic_fetch_lyrics: bool
+    ytmusic_fetch_credits: bool
+    ytmusic_embed_artwork: bool
     project_root: Path
     config_template_dir: Path | None = None
     telegram_connect_timeout: float = 30.0
@@ -119,6 +129,7 @@ class AppConfig:
         project_root = Path(__file__).resolve().parents[2]
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         raw_ids = os.environ.get("ALLOWED_TELEGRAM_IDS", "").strip()
+        app_state_dir = Path(os.environ.get("APP_STATE_DIR", "/data")).resolve()
         if not token:
             raise ValueError("TELEGRAM_BOT_TOKEN is required")
         if not raw_ids:
@@ -128,7 +139,7 @@ class AppConfig:
             allowed_telegram_ids=_parse_allowed_ids(raw_ids),
             music_library_dir=Path(os.environ.get("MUSIC_LIBRARY_DIR", "/music")).resolve(),
             staging_dir=Path(os.environ.get("STAGING_DIR", "/downloads")).resolve(),
-            app_state_dir=Path(os.environ.get("APP_STATE_DIR", "/data")).resolve(),
+            app_state_dir=app_state_dir,
             ytdlp_cookies_file=Path(
                 os.environ.get("YTDLP_COOKIES_FILE", "/run/secrets/youtube_cookies.txt")
             ).resolve(),
@@ -141,6 +152,18 @@ class AppConfig:
                 DEFAULT_YOUTUBE_PLAYER_CLIENTS,
             ),
             youtube_extractor_args=os.environ.get("YTDLP_YOUTUBE_EXTRACTOR_ARGS", "").strip() or None,
+            ytmusic_metadata_enabled=_getenv_bool("YTMUSIC_METADATA_ENABLED", True),
+            ytmusic_oauth_client_id=os.environ.get("YTMUSIC_OAUTH_CLIENT_ID", "").strip() or None,
+            ytmusic_oauth_client_secret=os.environ.get("YTMUSIC_OAUTH_CLIENT_SECRET", "").strip() or None,
+            ytmusic_oauth_file=Path(
+                os.environ.get("YTMUSIC_OAUTH_FILE", str(app_state_dir / "ytmusic" / "oauth.json"))
+            ).resolve(),
+            ytmusic_language=os.environ.get("YTMUSIC_LANGUAGE", "en").strip() or "en",
+            ytmusic_location=os.environ.get("YTMUSIC_LOCATION", "").strip(),
+            ytmusic_request_timeout=_getenv_float("YTMUSIC_REQUEST_TIMEOUT", 10.0),
+            ytmusic_fetch_lyrics=_getenv_bool("YTMUSIC_FETCH_LYRICS", True),
+            ytmusic_fetch_credits=_getenv_bool("YTMUSIC_FETCH_CREDITS", True),
+            ytmusic_embed_artwork=_getenv_bool("YTMUSIC_EMBED_ARTWORK", True),
             project_root=project_root,
             config_template_dir=_resolve_config_template_dir(project_root),
             telegram_connect_timeout=_getenv_float("TELEGRAM_CONNECT_TIMEOUT", 30.0),
@@ -207,6 +230,7 @@ class AppConfig:
         self.runtime_config_dir.mkdir(parents=True, exist_ok=True)
         self.playlist_dir.mkdir(parents=True, exist_ok=True)
         self.beets_library_path.parent.mkdir(parents=True, exist_ok=True)
+        self.ytmusic_oauth_file.parent.mkdir(parents=True, exist_ok=True)
         self._render_template(self.template_beets_config_path, self.runtime_beets_config_path)
         self._render_template(self.template_ytdlp_config_path, self.runtime_ytdlp_config_path)
 

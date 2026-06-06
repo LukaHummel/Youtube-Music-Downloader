@@ -106,6 +106,16 @@ class ConfigTests(unittest.TestCase):
                 ("default", "web_embedded", "web_safari", "mweb", "web"),
             )
             self.assertIsNone(config.youtube_extractor_args)
+            self.assertTrue(config.ytmusic_metadata_enabled)
+            self.assertIsNone(config.ytmusic_oauth_client_id)
+            self.assertIsNone(config.ytmusic_oauth_client_secret)
+            self.assertEqual(config.ytmusic_oauth_file, app_state_dir.resolve() / "ytmusic" / "oauth.json")
+            self.assertEqual(config.ytmusic_language, "en")
+            self.assertEqual(config.ytmusic_location, "")
+            self.assertEqual(config.ytmusic_request_timeout, 10.0)
+            self.assertTrue(config.ytmusic_fetch_lyrics)
+            self.assertTrue(config.ytmusic_fetch_credits)
+            self.assertTrue(config.ytmusic_embed_artwork)
             self.assertIn(
                 f"directory: {music_dir.resolve().as_posix()}",
                 config.runtime_beets_config_path.read_text(encoding="utf-8"),
@@ -138,6 +148,16 @@ class ConfigTests(unittest.TestCase):
                 "COLOR_LOGS": "false",
                 "YTDLP_YOUTUBE_PLAYER_CLIENTS": "mweb,web",
                 "YTDLP_YOUTUBE_EXTRACTOR_ARGS": "po_token=mweb.gvs+token",
+                "YTMUSIC_METADATA_ENABLED": "false",
+                "YTMUSIC_OAUTH_CLIENT_ID": "client-id",
+                "YTMUSIC_OAUTH_CLIENT_SECRET": "client-secret",
+                "YTMUSIC_OAUTH_FILE": str(temp_path / "oauth.json"),
+                "YTMUSIC_LANGUAGE": "de",
+                "YTMUSIC_LOCATION": "DE",
+                "YTMUSIC_REQUEST_TIMEOUT": "4.5",
+                "YTMUSIC_FETCH_LYRICS": "false",
+                "YTMUSIC_FETCH_CREDITS": "false",
+                "YTMUSIC_EMBED_ARTWORK": "false",
             }
             with mock.patch.dict(os.environ, env, clear=True):
                 config = AppConfig.from_env()
@@ -153,6 +173,16 @@ class ConfigTests(unittest.TestCase):
             self.assertFalse(config.color_logs)
             self.assertEqual(config.youtube_player_clients, ("mweb", "web"))
             self.assertEqual(config.youtube_extractor_args, "po_token=mweb.gvs+token")
+            self.assertFalse(config.ytmusic_metadata_enabled)
+            self.assertEqual(config.ytmusic_oauth_client_id, "client-id")
+            self.assertEqual(config.ytmusic_oauth_client_secret, "client-secret")
+            self.assertEqual(config.ytmusic_oauth_file, (temp_path / "oauth.json").resolve())
+            self.assertEqual(config.ytmusic_language, "de")
+            self.assertEqual(config.ytmusic_location, "DE")
+            self.assertEqual(config.ytmusic_request_timeout, 4.5)
+            self.assertFalse(config.ytmusic_fetch_lyrics)
+            self.assertFalse(config.ytmusic_fetch_credits)
+            self.assertFalse(config.ytmusic_embed_artwork)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from mediafile import FileTypeError, MediaFile, MutagenError, UnreadableFileError
+import requests
+from mediafile import FileTypeError, Image, MediaFile, MutagenError, UnreadableFileError
 
 from .config import AppConfig
 from .metadata import normalize_track_metadata, tag_values_from_metadata
@@ -67,6 +68,7 @@ class BeetsRunner:
         if not values:
             LOGGER.warning("No fallback metadata was available before beets import: path=%s", audio_path)
             return
+        artwork_url = values.pop("artwork_url", None)
         try:
             media = MediaFile(audio_path)
             changed_fields: list[str] = []
@@ -75,11 +77,19 @@ class BeetsRunner:
                 if overwrite or _missing_tag_value(current_value):
                     setattr(media, field, value)
                     changed_fields.append(field)
+            if artwork_url and (overwrite or _missing_tag_value(media.images)):
+                image = _download_artwork(
+                    artwork_url,
+                    timeout=getattr(self.config, "ytmusic_request_timeout", 10.0),
+                )
+                if image:
+                    media.images = [image]
+                    changed_fields.append("images")
             if not changed_fields:
                 LOGGER.info(
                     "Fallback metadata already present: path=%s candidate_fields=%s",
                     audio_path,
-                    ",".join(sorted(values)),
+                    ",".join(sorted([*values, "artwork_url"] if artwork_url else values)),
                 )
                 return
             media.save()
@@ -177,6 +187,23 @@ def _missing_tag_value(value: Any) -> bool:
     if isinstance(value, (list, tuple, set)):
         return not value
     return False
+
+
+def _download_artwork(url: str, *, timeout: float) -> Image | None:
+    try:
+        response = requests.get(url, timeout=timeout)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        LOGGER.warning("Could not download ytmusic artwork: %s", exc)
+        return None
+    if len(response.content) > 10 * 1024 * 1024:
+        LOGGER.warning("Skipping ytmusic artwork because it is larger than 10 MiB")
+        return None
+    try:
+        return Image(response.content)
+    except (AssertionError, ValueError) as exc:
+        LOGGER.warning("Could not parse ytmusic artwork: %s", exc)
+        return None
 
 
 def _format_command(command: list[str]) -> str:
