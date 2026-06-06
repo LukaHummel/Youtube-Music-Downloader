@@ -76,63 +76,100 @@ class YtMusicMetadataProvider:
             return item
 
         try:
-            watch = await asyncio.to_thread(client.get_watch_playlist, videoId=item.youtube_video_id, limit=1)
-            if not isinstance(watch, dict):
-                return item
-            track = _select_watch_track(watch, item.youtube_video_id)
-            if not track:
-                return item
-            enriched = dict(item.metadata)
-            enriched.update(_metadata_from_watch(track, watch, item.youtube_video_id))
-
-            album_id = _album_id(track)
-            album = await self._get_album(client, album_id)
-            if album:
-                enriched.update(_metadata_from_album(album, item.youtube_video_id))
-
-            credits_browse_id = _text(enriched.get("ytmusic_credits_browse_id"))
-            if self.config.ytmusic_fetch_credits and credits_browse_id:
-                credits = await self._get_credits(client, credits_browse_id)
-                if credits:
-                    enriched.update(_metadata_from_credits(credits))
-
-            lyrics_id = _text(enriched.get("ytmusic_lyrics_id"))
-            if self.config.ytmusic_fetch_lyrics and lyrics_id:
-                lyrics = await self._get_lyrics(client, lyrics_id)
-                if lyrics:
-                    enriched.update(_metadata_from_lyrics(lyrics))
-
-            if self.config.ytmusic_embed_artwork:
-                artwork = _select_artwork(enriched)
-                if artwork:
-                    enriched.update(artwork)
-            else:
-                _drop_internal_metadata(enriched)
-
-            _drop_internal_metadata(enriched)
-            enriched = normalize_track_metadata(enriched)
-            LOGGER.info(
-                "Enriched ytmusic metadata: video_id=%s title=%s artist=%s album=%s authenticated=%s",
-                item.youtube_video_id,
-                enriched.get("track") or enriched.get("title") or "unknown",
-                enriched.get("artist") or "unknown",
-                enriched.get("album") or "unknown",
-                self._client_authenticated,
-            )
-            return PreflightItem(
-                item_index=item.item_index,
-                source_url=item.source_url,
-                normalized_url=item.normalized_url,
-                youtube_video_id=item.youtube_video_id,
-                playlist_item_id=item.playlist_item_id,
-                title=enriched.get("track") or enriched.get("title"),
-                artist=enriched.get("artist") or enriched.get("albumartist"),
-                album=enriched.get("album"),
-                metadata=enriched,
-            )
+            return await self._enrich_item_with_client(item, client)
         except Exception as exc:
+            if self._client_authenticated:
+                LOGGER.warning(
+                    "Authenticated ytmusic metadata lookup failed for video_id=%s; retrying anonymously: %s",
+                    item.youtube_video_id,
+                    exc,
+                )
+                anonymous_client = self._anonymous_client_or_none()
+                if anonymous_client is not None:
+                    try:
+                        return await self._enrich_item_with_client(item, anonymous_client)
+                    except Exception as anonymous_exc:
+                        LOGGER.warning(
+                            "Anonymous ytmusic metadata retry failed for video_id=%s: %s",
+                            item.youtube_video_id,
+                            anonymous_exc,
+                        )
+                        return item
+            else:
+                authenticated_client = self._authenticated_client_or_none()
+                if authenticated_client is not None:
+                    LOGGER.warning(
+                        "Anonymous ytmusic metadata lookup failed for video_id=%s; retrying authenticated: %s",
+                        item.youtube_video_id,
+                        exc,
+                    )
+                    try:
+                        return await self._enrich_item_with_client(item, authenticated_client)
+                    except Exception as authenticated_exc:
+                        LOGGER.warning(
+                            "Authenticated ytmusic metadata retry failed for video_id=%s: %s",
+                            item.youtube_video_id,
+                            authenticated_exc,
+                        )
+                        return item
             LOGGER.warning("ytmusic metadata enrichment failed for video_id=%s: %s", item.youtube_video_id, exc)
             return item
+
+    async def _enrich_item_with_client(self, item: PreflightItem, client: Any) -> PreflightItem:
+        watch = await asyncio.to_thread(client.get_watch_playlist, videoId=item.youtube_video_id, limit=1)
+        if not isinstance(watch, dict):
+            return item
+        track = _select_watch_track(watch, item.youtube_video_id)
+        if not track:
+            return item
+        enriched = dict(item.metadata)
+        enriched.update(_metadata_from_watch(track, watch, item.youtube_video_id))
+
+        album_id = _album_id(track)
+        album = await self._get_album(client, album_id)
+        if album:
+            enriched.update(_metadata_from_album(album, item.youtube_video_id))
+
+        credits_browse_id = _text(enriched.get("ytmusic_credits_browse_id"))
+        if self.config.ytmusic_fetch_credits and credits_browse_id:
+            credits = await self._get_credits(client, credits_browse_id)
+            if credits:
+                enriched.update(_metadata_from_credits(credits))
+
+        lyrics_id = _text(enriched.get("ytmusic_lyrics_id"))
+        if self.config.ytmusic_fetch_lyrics and lyrics_id:
+            lyrics = await self._get_lyrics(client, lyrics_id)
+            if lyrics:
+                enriched.update(_metadata_from_lyrics(lyrics))
+
+        if self.config.ytmusic_embed_artwork:
+            artwork = _select_artwork(enriched)
+            if artwork:
+                enriched.update(artwork)
+        else:
+            _drop_internal_metadata(enriched)
+
+        _drop_internal_metadata(enriched)
+        enriched = normalize_track_metadata(enriched)
+        LOGGER.info(
+            "Enriched ytmusic metadata: video_id=%s title=%s artist=%s album=%s authenticated=%s",
+            item.youtube_video_id,
+            enriched.get("track") or enriched.get("title") or "unknown",
+            enriched.get("artist") or "unknown",
+            enriched.get("album") or "unknown",
+            self._client_authenticated,
+        )
+        return PreflightItem(
+            item_index=item.item_index,
+            source_url=item.source_url,
+            normalized_url=item.normalized_url,
+            youtube_video_id=item.youtube_video_id,
+            playlist_item_id=item.playlist_item_id,
+            title=enriched.get("track") or enriched.get("title"),
+            artist=enriched.get("artist") or enriched.get("albumartist"),
+            album=enriched.get("album"),
+            metadata=enriched,
+        )
 
     async def _get_album(self, client: Any, album_id: str | None) -> dict[str, Any] | None:
         if not album_id:
@@ -169,22 +206,40 @@ class YtMusicMetadataProvider:
     def _client_or_none(self) -> Any | None:
         if self._client is not None:
             return self._client
-        use_oauth = self.config.ytmusic_oauth_file.is_file() and self.auth_manager.client_credentials_available
-        if use_oauth:
-            try:
-                self._client = self._create_client(authenticated=True)
-                self._client_authenticated = True
-                self.auth_manager.clear_refresh_failed()
-                return self._client
-            except Exception as exc:
-                self.auth_manager.mark_refresh_failed()
-                LOGGER.warning("Could not create authenticated ytmusic client; using anonymous client: %s", exc)
         try:
             self._client = self._create_client(authenticated=False)
             self._client_authenticated = False
             return self._client
         except Exception as fallback_exc:
             LOGGER.warning("Could not create anonymous ytmusic client: %s", fallback_exc)
+        return self._authenticated_client_or_none()
+
+    def _anonymous_client_or_none(self) -> Any | None:
+        try:
+            self._client = self._create_client(authenticated=False)
+            self._client_authenticated = False
+            self._album_cache.clear()
+            self._credits_cache.clear()
+            self._lyrics_cache.clear()
+            return self._client
+        except Exception as exc:
+            LOGGER.warning("Could not create anonymous ytmusic client for retry: %s", exc)
+            return None
+
+    def _authenticated_client_or_none(self) -> Any | None:
+        if not (self.config.ytmusic_oauth_file.is_file() and self.auth_manager.client_credentials_available):
+            return None
+        try:
+            self._client = self._create_client(authenticated=True)
+            self._client_authenticated = True
+            self.auth_manager.clear_refresh_failed()
+            self._album_cache.clear()
+            self._credits_cache.clear()
+            self._lyrics_cache.clear()
+            return self._client
+        except Exception as exc:
+            self.auth_manager.mark_refresh_failed()
+            LOGGER.warning("Could not create authenticated ytmusic client: %s", exc)
             return None
 
     def _create_client(self, *, authenticated: bool) -> Any:

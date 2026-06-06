@@ -89,7 +89,7 @@ class YtMusicMetadataTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(provider._client_or_none(), client)
         self.assertEqual(calls[0][0], ())
 
-    async def test_uses_authenticated_client_with_token_file(self) -> None:
+    async def test_uses_unauthenticated_client_first_with_token_file(self) -> None:
         self.oauth_file.write_text("{}", encoding="utf-8")
         calls = []
         client = FakeYtMusicClient()
@@ -103,17 +103,17 @@ class YtMusicMetadataTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIs(provider._client_or_none(), client)
-        self.assertEqual(calls[0][0], (str(self.oauth_file),))
+        self.assertEqual(calls[0][0], ())
 
-    async def test_refresh_failure_falls_back_to_unauthenticated_client(self) -> None:
+    async def test_anonymous_client_creation_failure_falls_back_to_authenticated_client(self) -> None:
         self.oauth_file.write_text("{}", encoding="utf-8")
         client = FakeYtMusicClient()
         config = _config(self.oauth_file)
         auth = YtMusicAuthManager(config)
 
         def client_factory(*args, **kwargs):
-            if args:
-                raise RuntimeError("refresh failed")
+            if not args:
+                raise RuntimeError("anonymous failed")
             return client
 
         provider = YtMusicMetadataProvider(
@@ -124,7 +124,107 @@ class YtMusicMetadataTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIs(provider._client_or_none(), client)
+        self.assertEqual(auth.status(), YtMusicAuthStatus.AUTHENTICATED)
+
+    async def test_authenticated_client_creation_failure_marks_refresh_failed_after_anonymous_failure(self) -> None:
+        self.oauth_file.write_text("{}", encoding="utf-8")
+        config = _config(self.oauth_file)
+        auth = YtMusicAuthManager(config)
+
+        def client_factory(*args, **kwargs):
+            raise RuntimeError("client failed")
+
+        provider = YtMusicMetadataProvider(
+            config,
+            auth,
+            client_factory=client_factory,
+            oauth_credentials_factory=lambda **kwargs: SimpleNamespace(),
+        )
+
+        self.assertIsNone(provider._client_or_none())
         self.assertEqual(auth.status(), YtMusicAuthStatus.AUTHENTICATED_REFRESH_FAILED)
+
+    async def test_authenticated_lookup_failure_retries_anonymously(self) -> None:
+        self.oauth_file.write_text("{}", encoding="utf-8")
+        authenticated = FakeYtMusicClient()
+
+        def failing_watch(*, videoId: str, limit: int) -> dict:
+            raise RuntimeError("Server returned HTTP 400: Bad Request.")
+
+        authenticated.get_watch_playlist = failing_watch
+        anonymous = FakeYtMusicClient(
+            watch={
+                "tracks": [
+                    {
+                        "videoId": "target",
+                        "title": "Anonymous Song",
+                        "artists": [{"name": "Artist"}],
+                    }
+                ]
+            }
+        )
+        calls = []
+        config = _config(self.oauth_file)
+        auth = YtMusicAuthManager(config)
+
+        def client_factory(*args, **kwargs):
+            calls.append(args)
+            return authenticated if args else anonymous
+
+        provider = YtMusicMetadataProvider(
+            config,
+            auth,
+            client_factory=client_factory,
+            oauth_credentials_factory=lambda **kwargs: SimpleNamespace(),
+        )
+        provider._client = authenticated
+        provider._client_authenticated = True
+
+        result = await provider.enrich_item(_item())
+
+        self.assertEqual(result.title, "Anonymous Song")
+        self.assertEqual(calls, [()])
+        self.assertFalse(provider._client_authenticated)
+
+    async def test_anonymous_lookup_failure_retries_authenticated(self) -> None:
+        self.oauth_file.write_text("{}", encoding="utf-8")
+        anonymous = FakeYtMusicClient()
+
+        def failing_watch(*, videoId: str, limit: int) -> dict:
+            raise RuntimeError("anonymous failed")
+
+        anonymous.get_watch_playlist = failing_watch
+        authenticated = FakeYtMusicClient(
+            watch={
+                "tracks": [
+                    {
+                        "videoId": "target",
+                        "title": "Authenticated Song",
+                        "artists": [{"name": "Artist"}],
+                    }
+                ]
+            }
+        )
+        calls = []
+        config = _config(self.oauth_file)
+        auth = YtMusicAuthManager(config)
+
+        def client_factory(*args, **kwargs):
+            calls.append(args)
+            return authenticated if args else anonymous
+
+        provider = YtMusicMetadataProvider(
+            config,
+            auth,
+            client_factory=client_factory,
+            oauth_credentials_factory=lambda **kwargs: SimpleNamespace(),
+        )
+
+        result = await provider.enrich_item(_item())
+
+        self.assertEqual(result.title, "Authenticated Song")
+        self.assertEqual(calls, [(), (str(self.oauth_file),)])
+        self.assertTrue(provider._client_authenticated)
 
     async def test_watch_playlist_exact_video_match(self) -> None:
         client = FakeYtMusicClient(

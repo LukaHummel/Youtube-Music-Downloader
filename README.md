@@ -46,9 +46,9 @@ Optional environment variables:
 
 ## YouTube Music Metadata OAuth
 
-The bot can enrich downloaded files with YouTube Music-native title, artists, album, year, lyrics, credits-derived composer tags, and artwork. It starts without blocking even when OAuth is not configured; unauthenticated enrichment is used until a saved OAuth token is available.
+The bot can enrich downloaded files with YouTube Music-native title, artists, album, year, lyrics, credits-derived composer tags, and artwork. Public metadata enrichment normally does not require OAuth, so the app uses unauthenticated `ytmusicapi` metadata lookups first. OAuth is optional and can be used as a fallback/account-context setup when unauthenticated requests are insufficient.
 
-To enable authenticated enrichment:
+To configure optional OAuth:
 
 1. In Google Cloud, create an OAuth client ID for **TVs and Limited Input devices**.
 2. Enable the YouTube Data API for that project.
