@@ -16,6 +16,7 @@ ProgressCallback = Callable[[float | None, int | None, str | None], Awaitable[No
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_FORMAT_SELECTOR = "ba/bestaudio/best"
+DOWNLOAD_PLAYER_CLIENTS = (None, "android_vr", "web_embedded", "web", "mweb", "web_safari")
 AUTH_ERROR_MARKERS = (
     "private video",
     "private playlist",
@@ -28,6 +29,11 @@ AUTH_ERROR_MARKERS = (
 )
 PROGRESS_RE = re.compile(r"^download:(?P<percent>[^|]*)\|(?P<speed>[^|]*)\|(?P<eta>[^|]*)\|")
 AUDIO_SUFFIXES = {".aac", ".m4a", ".mp3", ".opus", ".flac", ".wav", ".ogg", ".alac"}
+FORMAT_UNAVAILABLE_MARKERS = (
+    "requested format is not available",
+    "no video formats found",
+    "no formats found",
+)
 
 
 class YtDlpError(RuntimeError):
@@ -110,27 +116,88 @@ class YtDlpRunner:
     ) -> DownloadResult:
         item_dir = self.config.staging_dir / str(job_id) / f"{item_index:04d}"
         item_dir.mkdir(parents=True, exist_ok=True)
-        command = [
-            *self._base_command(),
-            "--format",
-            DEFAULT_FORMAT_SELECTOR,
-            "--download-archive",
-            str(self.config.ytdlp_archive_path),
-            "--newline",
-            "--progress-template",
-            "download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(info.id)s|%(info.title)s",
-            "--paths",
-            str(item_dir),
-            "--output",
-            "%(album,artist,playlist_title,creator)s/%(track,title)s.%(ext)s",
-            url,
-        ]
-        LOGGER.info(
-            "Running yt-dlp download command for job_id=%s item_index=%s: %s",
-            job_id,
-            item_index,
-            _format_command(command),
+        collected: list[str] = []
+        for player_client in DOWNLOAD_PLAYER_CLIENTS:
+            command = self._download_command(item_dir=item_dir, url=url, player_client=player_client)
+            LOGGER.info(
+                "Running yt-dlp download command for job_id=%s item_index=%s player_client=%s: %s",
+                job_id,
+                item_index,
+                player_client or "default",
+                _format_command(command),
+            )
+            returncode, collected = await self._run_download_process(
+                command=command,
+                job_id=job_id,
+                item_index=item_index,
+                progress_callback=progress_callback,
+            )
+            output = "\n".join(collected)
+            if returncode == 0:
+                break
+            if _contains_format_unavailable_marker(output) and player_client is not DOWNLOAD_PLAYER_CLIENTS[-1]:
+                LOGGER.warning(
+                    "yt-dlp reported no usable format for job_id=%s item_index=%s player_client=%s; "
+                    "trying next YouTube client",
+                    job_id,
+                    item_index,
+                    player_client or "default",
+                )
+                continue
+            raise YtDlpError(
+                self._format_error(output),
+                auth_required=_contains_auth_marker(output),
+                output=output,
+            )
+        else:
+            raise YtDlpError("yt-dlp did not run a download attempt.")
+
+        audio_candidates = sorted(
+            (
+                path
+                for path in item_dir.rglob("*")
+                if path.is_file() and path.suffix.lower() in AUDIO_SUFFIXES
+            ),
+            key=lambda path: len(path.parts),
         )
+        if not audio_candidates:
+            raise YtDlpError(
+                "yt-dlp finished without producing an audio file.",
+                output="\n".join(collected),
+            )
+        info_json_path = next((path for path in item_dir.rglob("*.info.json") if path.is_file()), None)
+        return DownloadResult(audio_path=audio_candidates[0], info_json_path=info_json_path)
+
+    def _download_command(self, *, item_dir: Path, url: str, player_client: str | None) -> list[str]:
+        command = [*self._base_command()]
+        if player_client:
+            command.extend(["--extractor-args", f"youtube:player_client={player_client}"])
+        command.extend(
+            [
+                "--format",
+                DEFAULT_FORMAT_SELECTOR,
+                "--download-archive",
+                str(self.config.ytdlp_archive_path),
+                "--newline",
+                "--progress-template",
+                "download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(info.id)s|%(info.title)s",
+                "--paths",
+                str(item_dir),
+                "--output",
+                "%(album,artist,playlist_title,creator)s/%(track,title)s.%(ext)s",
+                url,
+            ]
+        )
+        return command
+
+    async def _run_download_process(
+        self,
+        *,
+        command: list[str],
+        job_id: int,
+        item_index: int,
+        progress_callback: ProgressCallback,
+    ) -> tuple[int, list[str]]:
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
@@ -154,30 +221,7 @@ class YtDlpRunner:
                     _parse_eta(match.group("eta")),
                     _clean_progress_value(match.group("speed")),
                 )
-        returncode = await process.wait()
-        output = "\n".join(collected)
-        if returncode != 0:
-            raise YtDlpError(
-                self._format_error(output),
-                auth_required=_contains_auth_marker(output),
-                output=output,
-            )
-
-        audio_candidates = sorted(
-            (
-                path
-                for path in item_dir.rglob("*")
-                if path.is_file() and path.suffix.lower() in AUDIO_SUFFIXES
-            ),
-            key=lambda path: len(path.parts),
-        )
-        if not audio_candidates:
-            raise YtDlpError(
-                "yt-dlp finished without producing an audio file.",
-                output="\n".join(collected),
-            )
-        info_json_path = next((path for path in item_dir.rglob("*.info.json") if path.is_file()), None)
-        return DownloadResult(audio_path=audio_candidates[0], info_json_path=info_json_path)
+        return await process.wait(), collected
 
     def _base_command(self) -> list[str]:
         command = ["yt-dlp", "--config-locations", str(self.config.runtime_ytdlp_config_path)]
@@ -284,6 +328,11 @@ def _coalesce_artist(payload: dict[str, Any]) -> str | None:
 def _contains_auth_marker(output: str) -> bool:
     lowered = output.lower()
     return any(marker in lowered for marker in AUTH_ERROR_MARKERS)
+
+
+def _contains_format_unavailable_marker(output: str) -> bool:
+    lowered = output.lower()
+    return any(marker in lowered for marker in FORMAT_UNAVAILABLE_MARKERS)
 
 
 def _format_command(command: list[str]) -> str:

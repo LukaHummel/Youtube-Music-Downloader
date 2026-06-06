@@ -7,7 +7,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from ytmusic_jellyfin_bot.models import RequestKind
-from ytmusic_jellyfin_bot.ytdlp_runner import YtDlpError, YtDlpRunner
+from ytmusic_jellyfin_bot.ytdlp_runner import DEFAULT_FORMAT_SELECTOR, YtDlpError, YtDlpRunner
 
 
 class FakeYtDlpRunner(YtDlpRunner):
@@ -19,6 +19,7 @@ class FakeYtDlpRunner(YtDlpRunner):
     ):
         config = SimpleNamespace(
             runtime_ytdlp_config_path=Path("yt-dlp.conf"),
+            ytdlp_archive_path=Path("/data/yt-dlp-archive.txt"),
             cookies_available=cookies_available,
             ytdlp_cookies_file=Path("/run/secrets/youtube_cookies.txt"),
         )
@@ -84,6 +85,31 @@ class YtDlpRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(caught.exception.auth_required)
         self.assertIn("Required cookies.txt file", str(caught.exception))
+
+    def test_download_command_uses_cookies_and_format_selector(self) -> None:
+        runner = FakeYtDlpRunner((json.dumps({}), "", 0))
+
+        command = runner._download_command(
+            item_dir=Path("/downloads/1/0001"),
+            url="https://music.youtube.com/watch?v=ADUis5-M15Y",
+            player_client=None,
+        )
+
+        self.assertIn("--cookies", command)
+        self.assertEqual(command[command.index("--format") + 1], DEFAULT_FORMAT_SELECTOR)
+        self.assertNotIn("--extractor-args", command)
+
+    def test_download_command_explicit_player_client_keeps_cookies(self) -> None:
+        runner = FakeYtDlpRunner((json.dumps({}), "", 0))
+
+        command = runner._download_command(
+            item_dir=Path("/downloads/1/0001"),
+            url="https://music.youtube.com/watch?v=ADUis5-M15Y",
+            player_client="android_vr",
+        )
+
+        self.assertIn("--cookies", command)
+        self.assertEqual(command[command.index("--extractor-args") + 1], "youtube:player_client=android_vr")
 
 
 if __name__ == "__main__":
