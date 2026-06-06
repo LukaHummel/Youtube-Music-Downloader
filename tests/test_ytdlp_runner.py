@@ -7,7 +7,13 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from ytmusic_jellyfin_bot.models import RequestKind
-from ytmusic_jellyfin_bot.ytdlp_runner import FormatSelection, YtDlpError, YtDlpRunner, _format_command
+from ytmusic_jellyfin_bot.ytdlp_runner import (
+    FormatSelection,
+    YtDlpError,
+    YtDlpRunner,
+    _contains_auth_marker,
+    _format_command,
+)
 
 
 class FakeYtDlpRunner(YtDlpRunner):
@@ -22,7 +28,7 @@ class FakeYtDlpRunner(YtDlpRunner):
             ytdlp_archive_path=Path("/data/yt-dlp-archive.txt"),
             cookies_available=cookies_available,
             ytdlp_cookies_file=Path("/run/secrets/youtube_cookies.txt"),
-            youtube_player_clients=("android_vr", "default", "web_embedded"),
+            youtube_player_clients=("default", "web_embedded", "mweb"),
             youtube_extractor_args=None,
         )
         super().__init__(config)
@@ -114,7 +120,7 @@ class YtDlpRunnerTests(unittest.IsolatedAsyncioTestCase):
         runner = FakeYtDlpRunner((json.dumps({}), "", 0))
         selection = FormatSelection(
             format_id="251",
-            player_client="android_vr",
+            player_client="web_embedded",
             ext="webm",
             acodec="opus",
             vcodec="none",
@@ -129,7 +135,7 @@ class YtDlpRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn("--cookies", command)
-        self.assertEqual(command[command.index("--extractor-args") + 1], "youtube:player_client=android_vr")
+        self.assertEqual(command[command.index("--extractor-args") + 1], "youtube:player_client=web_embedded")
 
     async def test_resolve_download_format_selects_best_audio_format(self) -> None:
         payload = {
@@ -144,7 +150,7 @@ class YtDlpRunnerTests(unittest.IsolatedAsyncioTestCase):
         selection = await runner._resolve_download_format("https://music.youtube.com/watch?v=ADUis5-M15Y")
 
         self.assertEqual(selection.format_id, "251")
-        self.assertEqual(selection.player_client, "android_vr")
+        self.assertIsNone(selection.player_client)
 
     async def test_resolve_download_format_tries_next_client_when_no_formats_exist(self) -> None:
         empty_payload = {"formats": []}
@@ -160,7 +166,7 @@ class YtDlpRunnerTests(unittest.IsolatedAsyncioTestCase):
         selection = await runner._resolve_download_format("https://music.youtube.com/watch?v=ADUis5-M15Y")
 
         self.assertEqual(selection.format_id, "251")
-        self.assertIsNone(selection.player_client)
+        self.assertEqual(selection.player_client, "web_embedded")
 
     def test_download_command_adds_custom_youtube_extractor_args(self) -> None:
         runner = FakeYtDlpRunner((json.dumps({}), "", 0))
@@ -183,6 +189,11 @@ class YtDlpRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         extractor_args = command[command.index("--extractor-args") + 1]
         self.assertEqual(extractor_args, "youtube:player_client=mweb;po_token=mweb.gvs+secret-token")
+
+    def test_cookie_client_warning_is_not_auth_failure(self) -> None:
+        output = 'WARNING: [youtube] Skipping client "android_vr" since it does not support cookies'
+
+        self.assertFalse(_contains_auth_marker(output))
 
     def test_format_command_redacts_po_token(self) -> None:
         command = [

@@ -35,7 +35,7 @@ Optional environment variables:
 - `LOG_LEVEL` controls this app's logs. It defaults to `INFO`.
 - `EXTERNAL_LOG_LEVEL` controls noisy dependency logs from Telegram/httpx. It defaults to `WARNING`.
 - `COLOR_LOGS` controls ANSI-colored severity tags in container logs. It defaults to `true`.
-- `YTDLP_YOUTUBE_PLAYER_CLIENTS` controls the YouTube player-client probe order. It defaults to `android_vr,default,web_embedded,web_safari,mweb,web`.
+- `YTDLP_YOUTUBE_PLAYER_CLIENTS` controls the YouTube player-client probe order. It defaults to `default,web_embedded,web_safari,mweb,web`.
 - `YTDLP_YOUTUBE_EXTRACTOR_ARGS` appends YouTube extractor args to format probes and downloads. Use this for PO-token settings when YouTube requires them for your cookie session; for example, pair `YTDLP_YOUTUBE_PLAYER_CLIENTS=mweb` with a matching `po_token=...` value.
 
 ## Local Run

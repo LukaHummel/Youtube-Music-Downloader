@@ -51,6 +51,15 @@ class ConfigTests(unittest.TestCase):
                     (package_config_dir / filename).read_text(encoding="utf-8"),
                 )
 
+    def test_ytdlp_template_does_not_inject_thumbnail_crop_filter(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+
+        config_text = (repo_root / "config" / "yt-dlp.conf").read_text(encoding="utf-8")
+
+        self.assertIn("--convert-thumbnails", config_text)
+        self.assertIn("--embed-thumbnail", config_text)
+        self.assertNotIn("ThumbnailsConvertor+ffmpeg_o", config_text)
+
     def test_from_env_uses_config_template_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             temp_path = Path(tempdir)
@@ -94,7 +103,7 @@ class ConfigTests(unittest.TestCase):
             self.assertTrue(config.color_logs)
             self.assertEqual(
                 config.youtube_player_clients,
-                ("android_vr", "default", "web_embedded", "web_safari", "mweb", "web"),
+                ("default", "web_embedded", "web_safari", "mweb", "web"),
             )
             self.assertIsNone(config.youtube_extractor_args)
             self.assertIn(

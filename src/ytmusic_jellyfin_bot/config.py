@@ -6,7 +6,7 @@ from pathlib import Path
 
 CONFIG_TEMPLATE_DIR_ENV = "CONFIG_TEMPLATE_DIR"
 CONFIG_TEMPLATE_FILENAMES = ("beets.yaml", "yt-dlp.conf")
-DEFAULT_YOUTUBE_PLAYER_CLIENTS = ("android_vr", "default", "web_embedded", "web_safari", "mweb", "web")
+DEFAULT_YOUTUBE_PLAYER_CLIENTS = ("default", "web_embedded", "web_safari", "mweb", "web")
 
 
 def _parse_allowed_ids(raw_value: str) -> frozenset[int]:
