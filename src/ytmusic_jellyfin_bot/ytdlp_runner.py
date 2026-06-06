@@ -16,7 +16,7 @@ ProgressCallback = Callable[[float | None, int | None, str | None], Awaitable[No
 LOGGER = logging.getLogger(__name__)
 
 YOUTUBE_EXTRACTOR_ARGS = "youtube:player_client=web_music"
-DEFAULT_FORMAT_SELECTOR = "ba/b"
+DEFAULT_FORMAT_SELECTOR = "ba/bestaudio/best"
 AUTH_ERROR_MARKERS = (
     "private video",
     "private playlist",

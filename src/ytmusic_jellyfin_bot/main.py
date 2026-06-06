@@ -10,7 +10,7 @@ from .config import AppConfig
 from .db import Database
 from .playlist_writer import PlaylistWriter
 from .worker import JobWorker
-from .ytdlp_runner import YtDlpRunner
+from .ytdlp_runner import DEFAULT_FORMAT_SELECTOR, YtDlpRunner
 
 EXTERNAL_LOGGERS = ("telegram", "httpx", "httpcore")
 PLAIN_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -50,6 +50,11 @@ def main() -> None:
         config.staging_dir,
         config.app_state_dir,
         "available" if config.cookies_available else "not available",
+    )
+    logging.getLogger(__name__).info(
+        "yt-dlp runtime config=%s download_format=%s preflight_config=ignored",
+        config.runtime_ytdlp_config_path,
+        DEFAULT_FORMAT_SELECTOR,
     )
     if not config.cookies_available:
         logging.getLogger(__name__).warning(
