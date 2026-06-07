@@ -92,7 +92,6 @@ class JobWorker:
                     finished_at=self._timestamp(),
                 )
                 await self._notify_progress(job.id, True)
-                await self._notify(job.chat_id, f"Job #{job.id} failed with an internal error.", job.id)
 
     async def _process_job(self, job: JobRecord) -> None:
         LOGGER.info(
@@ -142,7 +141,6 @@ class JobWorker:
                 finished_at=self._timestamp(),
             )
             await self._notify_progress(job.id, True)
-            await self._notify(job.chat_id, f"Job #{job.id} failed during preflight.\n{message}", job.id)
             return
 
         if self.ytmusic:
@@ -188,7 +186,6 @@ class JobWorker:
                     finished_at=self._timestamp(),
                 )
                 await self._notify_progress(job.id, True)
-                await self._notify(job.chat_id, f"Job #{job.id} was cancelled.", job.id)
                 return
 
             source_key = self.db.source_key_for_video(item.youtube_video_id or "")
@@ -406,7 +403,6 @@ class JobWorker:
         await self._notify_progress(job.id, True)
         log_method = LOGGER.info if final_status is JobStatus.COMPLETED else LOGGER.warning
         log_method("Job #%s finished: status=%s %s", job.id, final_status, summary)
-        await self._notify(job.chat_id, f"Job #{job.id} finished.\n{summary}", job.id)
 
     async def _update_progress(
         self,

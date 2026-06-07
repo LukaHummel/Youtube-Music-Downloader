@@ -224,6 +224,46 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn((job.id, True), progress_calls)
             self.assertIn((job.id, False), progress_calls)
 
+    async def test_successful_completion_only_updates_progress_card(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            temp_path = Path(tempdir)
+            audio_path = temp_path / "track.m4a"
+            audio_path.write_bytes(b"placeholder")
+            db = Database(temp_path / "app.db")
+            job = db.create_job(
+                source_url="https://music.youtube.com/watch?v=video",
+                normalized_url="https://music.youtube.com/watch?v=video",
+                request_kind=RequestKind.TRACK,
+                chat_id=1,
+                user_id=2,
+                requested_by="tester",
+                source_id="video",
+            )
+            worker = JobWorker(
+                config=SimpleNamespace(),
+                db=db,
+                ytdlp=FakeProgressYtDlp(audio_path),
+                beets=FakeBeets(),
+                playlist_writer=FakePlaylistWriter(),
+                ytmusic=FakeYtMusic(),
+            )
+            progress_calls = []
+            telegram_notifications = []
+
+            async def progress_notifier(job_id: int, force: bool) -> None:
+                progress_calls.append((job_id, force))
+
+            async def telegram_notifier(chat_id: int, message: str, job_id: int | None) -> None:
+                telegram_notifications.append((chat_id, message, job_id))
+
+            worker.set_progress_notifier(progress_notifier)
+            worker.set_notifier(telegram_notifier)
+
+            await worker._process_job(job)
+
+            self.assertTrue(progress_calls)
+            self.assertEqual(telegram_notifications, [])
+
     async def test_successful_import_cleans_temporary_download_folder(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             temp_path = Path(tempdir)

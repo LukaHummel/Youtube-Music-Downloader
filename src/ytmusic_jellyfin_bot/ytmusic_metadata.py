@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import re
 from collections.abc import Mapping
 from typing import Any, Callable
 
 import requests
 
 from .config import AppConfig
-from .metadata import normalize_track_metadata
+from .metadata import clean_track_title, normalize_track_metadata, parse_artist_title
 from .models import PreflightItem, PreflightResult
 from .ytmusic_auth import YtMusicAuthManager
 
@@ -59,6 +60,12 @@ LOGGED_METADATA_FIELDS = (
 )
 
 MAX_LOG_VALUE_LENGTH = 100
+VIDEO_TYPES_WITH_SPARSE_WATCH_METADATA = {"MUSIC_VIDEO_TYPE_OMV", "MUSIC_VIDEO_TYPE_UGC"}
+MATCH_TEXT_RE = re.compile(r"[^a-z0-9]+")
+TITLE_SUFFIX_NOISE_RE = re.compile(
+    r"\s+[-–—]\s+(?:official\s+)?(?:music\s+)?(?:video|visuali[sz]er|audio|lyrics?|lyric\s+video).*$",
+    re.IGNORECASE,
+)
 
 
 class YtMusicMetadataProvider:
@@ -79,6 +86,7 @@ class YtMusicMetadataProvider:
         self._album_cache: dict[str, dict[str, Any] | None] = {}
         self._credits_cache: dict[str, dict[str, Any] | None] = {}
         self._lyrics_cache: dict[str, dict[str, Any] | None] = {}
+        self._search_cache: dict[str, list[dict[str, Any]]] = {}
 
     def clear_client_cache(self) -> None:
         self._client = None
@@ -86,6 +94,7 @@ class YtMusicMetadataProvider:
         self._album_cache.clear()
         self._credits_cache.clear()
         self._lyrics_cache.clear()
+        self._search_cache.clear()
 
     async def enrich_preflight(self, preflight: PreflightResult) -> PreflightResult:
         if not self.config.ytmusic_metadata_enabled:
@@ -195,13 +204,21 @@ class YtMusicMetadataProvider:
                 _client_label(self._client_authenticated),
             )
             return item
+        lookup_video_id = item.youtube_video_id
+        fallback = await self._song_search_fallback(client, item=item, watch=watch, track=track)
+        fallback_used = fallback is not None
+        if fallback:
+            watch, track, lookup_video_id = fallback
+
         enriched = dict(item.metadata)
-        enriched.update(_metadata_from_watch(track, watch, item.youtube_video_id))
+        enriched.update(_metadata_from_watch(track, watch, lookup_video_id))
+        if fallback_used and lookup_video_id != item.youtube_video_id:
+            enriched.setdefault("ytmusic_counterpart_video_id", item.youtube_video_id)
 
         album_id = _album_id(track)
         album = await self._get_album(client, album_id)
         if album:
-            enriched.update(_metadata_from_album(album, item.youtube_video_id))
+            enriched.update(_metadata_from_album(album, lookup_video_id))
 
         credits_browse_id = _text(enriched.get("ytmusic_credits_browse_id"))
         if self.config.ytmusic_fetch_credits and credits_browse_id:
@@ -230,7 +247,7 @@ class YtMusicMetadataProvider:
             "ytmusic metadata result: video_id=%s client=%s matched=True matched_video_id=%s "
             "changed_fields=%s added_fields=%s title=%s artist=%s album=%s albumartist=%s year=%s "
             "track_number=%s track_total=%s album_id=%s playlist_id=%s lyrics=%s credits=%s artwork=%s "
-            "artwork_size=%sx%s",
+            "artwork_size=%sx%s fallback=%s missing_rich_fields=%s",
             item.youtube_video_id,
             _client_label(self._client_authenticated),
             _log_value(enriched.get("ytmusic_video_id")),
@@ -250,6 +267,8 @@ class YtMusicMetadataProvider:
             bool(enriched.get("ytmusic_artwork_url")),
             enriched.get("ytmusic_artwork_width") or 0,
             enriched.get("ytmusic_artwork_height") or 0,
+            "song_search" if fallback_used else "none",
+            _field_list(_missing_rich_fields(enriched)),
         )
         return PreflightItem(
             item_index=item.item_index,
@@ -262,6 +281,72 @@ class YtMusicMetadataProvider:
             album=enriched.get("album"),
             metadata=enriched,
         )
+
+    async def _song_search_fallback(
+        self,
+        client: Any,
+        *,
+        item: PreflightItem,
+        watch: dict[str, Any],
+        track: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], str] | None:
+        direct_metadata = _metadata_from_watch(track, watch, item.youtube_video_id)
+        if not _needs_song_search_fallback(direct_metadata):
+            return None
+        query = _song_search_query(item, track)
+        if not query:
+            return None
+
+        results = await self._search_songs(client, query)
+        candidate = _select_search_song(results, item=item, track=track)
+        candidate_video_id = _text(candidate.get("videoId")) if candidate else None
+        if not (candidate and candidate_video_id) or candidate_video_id == item.youtube_video_id:
+            LOGGER.info(
+                "ytmusic song search fallback not accepted: video_id=%s query=%s result_count=%s "
+                "reason=no_exact_song_match",
+                item.youtube_video_id,
+                _log_value(query),
+                len(results),
+            )
+            return None
+
+        try:
+            candidate_watch = await asyncio.to_thread(client.get_watch_playlist, videoId=candidate_video_id, limit=1)
+        except Exception as exc:
+            LOGGER.warning(
+                "ytmusic song search fallback watch lookup failed: video_id=%s matched_video_id=%s error=%s",
+                item.youtube_video_id,
+                candidate_video_id,
+                exc,
+            )
+            return None
+        if not isinstance(candidate_watch, dict):
+            return None
+
+        candidate_track = _select_watch_track(candidate_watch, candidate_video_id) or candidate
+        candidate_track = _merge_missing_search_result_fields(candidate_track, candidate)
+        LOGGER.info(
+            "ytmusic song search fallback accepted: video_id=%s query=%s matched_video_id=%s title=%s artist=%s "
+            "album=%s",
+            item.youtube_video_id,
+            _log_value(query),
+            candidate_video_id,
+            _log_value(candidate_track.get("title")),
+            _log_value(", ".join(_artist_names(candidate_track.get("artists")))),
+            _log_value(_album_name(candidate_track)),
+        )
+        return candidate_watch, candidate_track, candidate_video_id
+
+    async def _search_songs(self, client: Any, query: str) -> list[dict[str, Any]]:
+        cache_key = query.casefold()
+        if cache_key not in self._search_cache:
+            try:
+                results = await asyncio.to_thread(client.search, query, filter="songs", limit=10)
+            except Exception as exc:
+                LOGGER.warning("ytmusic song search fallback failed: query=%s error=%s", _log_value(query), exc)
+                results = []
+            self._search_cache[cache_key] = [result for result in results if isinstance(result, dict)]
+        return self._search_cache[cache_key]
 
     async def _get_album(self, client: Any, album_id: str | None) -> dict[str, Any] | None:
         if not album_id:
@@ -442,6 +527,148 @@ def _select_watch_track(watch: dict[str, Any], video_id: str) -> dict[str, Any] 
         if isinstance(counterpart, dict) and counterpart.get("videoId") == video_id:
             return track
     return tracks[0] if isinstance(tracks[0], dict) else None
+
+
+def _needs_song_search_fallback(metadata: dict[str, Any]) -> bool:
+    video_type = _text(metadata.get("ytmusic_video_type"))
+    if video_type not in VIDEO_TYPES_WITH_SPARSE_WATCH_METADATA:
+        return False
+    return not (_text(metadata.get("ytmusic_album_id")) or _text(metadata.get("album")))
+
+
+def _song_search_query(item: PreflightItem, track: dict[str, Any]) -> str | None:
+    title = _query_title(_text(track.get("title")) or item.title or _text(item.metadata.get("title")))
+    artists = _artist_names(track.get("artists")) or _artist_values(
+        item.metadata.get("artists"),
+        item.metadata.get("artist"),
+        item.artist,
+        item.metadata.get("creator"),
+        item.metadata.get("channel"),
+    )
+    if title and artists:
+        return f"{artists[0]} {title}"
+    if title:
+        return title
+    return None
+
+
+def _query_title(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = _strip_match_title_noise(value)
+    parsed = parse_artist_title(cleaned)
+    if parsed:
+        cleaned = parsed[1]
+    return _text(cleaned)
+
+
+def _select_search_song(
+    results: list[dict[str, Any]],
+    *,
+    item: PreflightItem,
+    track: dict[str, Any],
+) -> dict[str, Any] | None:
+    target_titles = _title_match_values(_text(track.get("title")) or item.title or _text(item.metadata.get("title")))
+    if not target_titles:
+        return None
+    target_artists = _normalized_artist_values(
+        track.get("artists"),
+        item.metadata.get("artists"),
+        item.metadata.get("artist"),
+        item.artist,
+        item.metadata.get("creator"),
+        item.metadata.get("channel"),
+    )
+    target_duration = _duration_seconds(item.metadata.get("duration")) or _duration_seconds(track.get("duration"))
+
+    for result in results:
+        if _text(result.get("resultType")) != "song":
+            continue
+        candidate_titles = _title_match_values(_text(result.get("title")))
+        if not target_titles.intersection(candidate_titles):
+            continue
+        candidate_artists = _normalized_artist_values(result.get("artists"), result.get("artist"))
+        if target_artists and candidate_artists and not target_artists.intersection(candidate_artists):
+            continue
+        candidate_duration = _duration_seconds(result.get("duration"))
+        if target_duration and candidate_duration and not _duration_close(target_duration, candidate_duration):
+            continue
+        return result
+    return None
+
+
+def _merge_missing_search_result_fields(track: dict[str, Any], search_result: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(track)
+    for key in ("album", "artists", "duration", "title", "videoId", "videoType", "year", "isExplicit"):
+        if not _has_loggable_value(merged.get(key)) and _has_loggable_value(search_result.get(key)):
+            merged[key] = search_result[key]
+    if not _thumbnails(merged) and _thumbnails(search_result):
+        merged["thumbnail"] = search_result.get("thumbnail") or search_result.get("thumbnails")
+    return merged
+
+
+def _title_match_values(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    candidates = {value, clean_track_title(value), _strip_match_title_noise(value)}
+    parsed = parse_artist_title(_strip_match_title_noise(value))
+    if parsed:
+        candidates.add(parsed[1])
+    return {_match_text(candidate) for candidate in candidates if _match_text(candidate)}
+
+
+def _strip_match_title_noise(value: str) -> str:
+    cleaned = clean_track_title(value)
+    previous = None
+    while previous != cleaned:
+        previous = cleaned
+        cleaned = TITLE_SUFFIX_NOISE_RE.sub("", cleaned).strip()
+    return cleaned
+
+
+def _normalized_artist_values(*values: Any) -> set[str]:
+    return {_match_text(artist) for artist in _artist_values(*values) if _match_text(artist)}
+
+
+def _artist_values(*values: Any) -> list[str]:
+    artists: list[str] = []
+    for value in values:
+        if isinstance(value, list):
+            artists.extend(_artist_names(value))
+            continue
+        text = _text(value)
+        if not text:
+            continue
+        artists.extend(part.strip() for part in text.split(",") if part.strip())
+    return artists
+
+
+def _match_text(value: str) -> str:
+    return MATCH_TEXT_RE.sub(" ", value.casefold()).strip()
+
+
+def _duration_seconds(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value) if value > 0 else None
+    text = _text(value)
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    parts = text.split(":")
+    if not all(part.isdigit() for part in parts):
+        return None
+    total = 0
+    for part in parts:
+        total = total * 60 + int(part)
+    return total or None
+
+
+def _duration_close(first: int, second: int) -> bool:
+    tolerance = max(3, round(first * 0.05))
+    return abs(first - second) <= tolerance
 
 
 def _find_album_track(album: dict[str, Any], video_id: str) -> dict[str, Any] | None:
@@ -636,6 +863,21 @@ def _metadata_added_fields(before: Mapping[str, Any], after: Mapping[str, Any]) 
         if _has_loggable_value(after.get(field)) and not _has_loggable_value(before.get(field)):
             fields.append(field)
     return fields
+
+
+def _missing_rich_fields(metadata: Mapping[str, Any]) -> list[str]:
+    missing: list[str] = []
+    if not _has_loggable_value(metadata.get("album")):
+        missing.append("album")
+    if not _has_loggable_value(metadata.get("lyrics")):
+        missing.append("lyrics")
+    if not _has_loggable_value(metadata.get("ytmusic_credits")):
+        missing.append("credits")
+    if not _has_loggable_value(metadata.get("track_number")):
+        missing.append("track_number")
+    if not _has_loggable_value(metadata.get("track_total")):
+        missing.append("track_total")
+    return missing
 
 
 def _has_loggable_value(value: Any) -> bool:

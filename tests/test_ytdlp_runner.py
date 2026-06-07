@@ -9,10 +9,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from ytmusic_jellyfin_bot.models import RequestKind
 from ytmusic_jellyfin_bot.ytdlp_runner import (
     FormatSelection,
+    PROGRESS_RE,
     YtDlpError,
     YtDlpRunner,
     _contains_auth_marker,
     _format_command,
+    _parse_eta,
 )
 
 
@@ -116,6 +118,27 @@ class YtDlpRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("--cookies", command)
         self.assertEqual(command[command.index("--format") + 1], "251")
         self.assertNotIn("--extractor-args", command)
+        progress_template = command[command.index("--progress-template") + 1]
+        self.assertEqual(
+            progress_template,
+            "download:download:%(progress._percent_str)s|%(progress._speed_str)s|"
+            "%(progress._eta_str)s|%(info.id)s|%(info.title)s",
+        )
+
+    def test_progress_regex_accepts_literal_download_prefix(self) -> None:
+        match = PROGRESS_RE.match(" download: 42.5%|1.0MiB/s|00:30|video|Title")
+
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match.group("percent").strip(), "42.5%")
+        self.assertEqual(match.group("speed"), "1.0MiB/s")
+        self.assertEqual(match.group("eta"), "00:30")
+
+    def test_parse_eta_accepts_stopwatch_formats(self) -> None:
+        self.assertEqual(_parse_eta("30"), 30)
+        self.assertEqual(_parse_eta("01:30"), 90)
+        self.assertEqual(_parse_eta("01:02:03"), 3723)
+        self.assertIsNone(_parse_eta("--:--"))
 
     def test_download_command_explicit_player_client_keeps_cookies(self) -> None:
         runner = FakeYtDlpRunner((json.dumps({}), "", 0))

@@ -268,19 +268,6 @@ class TelegramProgressCardTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("Cancel", cancelled_buttons[0])
             self.assertIn(["Retry"], cancelled_buttons)
 
-    async def test_callback_refresh_edits_card_and_answers(self) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
-            db = Database(Path(tempdir) / "app.db")
-            job = self._create_job(db)
-            db.update_job(job.id, progress_message_id=77)
-            service, bot, _worker = self._service(db)
-            update = FakeCallbackUpdate(f"job:refresh:{job.id}")
-
-            await service.job_callback(update, SimpleNamespace())
-
-            self.assertEqual(bot.edits[0]["message_id"], 77)
-            self.assertEqual(update.callback_query.answers[-1], ("Progress refreshed.", False))
-
     async def test_callback_cancel_updates_queued_job_and_answers(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             db = Database(Path(tempdir) / "app.db")

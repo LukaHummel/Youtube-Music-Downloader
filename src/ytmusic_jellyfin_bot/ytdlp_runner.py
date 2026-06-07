@@ -29,7 +29,7 @@ AUTH_ERROR_MARKERS = (
     "confirm your age",
     "age-restricted",
 )
-PROGRESS_RE = re.compile(r"^download:(?P<percent>[^|]*)\|(?P<speed>[^|]*)\|(?P<eta>[^|]*)\|")
+PROGRESS_RE = re.compile(r"^\s*download:(?P<percent>[^|]*)\|(?P<speed>[^|]*)\|(?P<eta>[^|]*)\|")
 AUDIO_SUFFIXES = {".aac", ".m4a", ".mp3", ".opus", ".flac", ".wav", ".ogg", ".alac"}
 
 
@@ -264,7 +264,7 @@ class YtDlpRunner:
                 str(self.config.ytdlp_archive_path),
                 "--newline",
                 "--progress-template",
-                "download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(info.id)s|%(info.title)s",
+                "download:download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(info.id)s|%(info.title)s",
                 "--paths",
                 str(item_dir),
                 "--output",
@@ -400,7 +400,17 @@ def _parse_eta(value: str) -> int | None:
     cleaned = _clean_progress_value(value)
     if not cleaned or cleaned in {"NA", "--:--"}:
         return None
-    return int(cleaned) if cleaned.isdigit() else None
+    if cleaned.isdigit():
+        return int(cleaned)
+    pieces = cleaned.split(":")
+    if not 2 <= len(pieces) <= 3:
+        return None
+    if not all(piece.isdigit() for piece in pieces):
+        return None
+    seconds = 0
+    for piece in pieces:
+        seconds = seconds * 60 + int(piece)
+    return seconds
 
 
 def _clean_progress_value(value: str) -> str | None:

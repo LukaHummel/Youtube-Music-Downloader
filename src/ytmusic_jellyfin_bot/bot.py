@@ -29,9 +29,9 @@ YOUTUBE_URL_RE = re.compile(
     re.IGNORECASE,
 )
 TRAILING_URL_PUNCTUATION = ".,;:!?\"'"
-JOB_CALLBACK_RE = re.compile(r"^job:(?P<action>refresh|cancel|retry):(?P<job_id>\d+)$")
-PROGRESS_THROTTLE_SECONDS = 10.0
-PROGRESS_THROTTLE_PERCENT_DELTA = 5.0
+JOB_CALLBACK_RE = re.compile(r"^job:(?P<action>cancel|retry):(?P<job_id>\d+)$")
+PROGRESS_THROTTLE_SECONDS = 2.0
+PROGRESS_THROTTLE_PERCENT_DELTA = 2.0
 PROGRESS_BAR_WIDTH = 10
 SOURCE_LABEL_MAX_LENGTH = 160
 CURRENT_ITEM_MAX_LENGTH = 180
@@ -189,10 +189,6 @@ class TelegramBotService:
 
         action = match.group("action")
         job_id = int(match.group("job_id"))
-        if action == "refresh":
-            await self.update_progress_card(job_id, True)
-            await self._answer_callback(query, "Progress refreshed.")
-            return
         if action == "cancel":
             await self._cancel_from_callback(query, job_id)
             return
@@ -640,13 +636,10 @@ def _render_progress_card(job: JobRecord, items: list[JobItemRecord]) -> str:
 
 
 def _build_progress_keyboard(job: JobRecord) -> InlineKeyboardMarkup:
-    action_row = [
-        InlineKeyboardButton("Refresh", callback_data=f"job:refresh:{job.id}"),
-    ]
+    rows: list[list[InlineKeyboardButton]] = []
     if job.status in ACTIVE_JOB_STATUSES and not job.cancel_requested:
-        action_row.append(InlineKeyboardButton("Cancel", callback_data=f"job:cancel:{job.id}"))
+        rows.append([InlineKeyboardButton("Cancel", callback_data=f"job:cancel:{job.id}")])
 
-    rows = [action_row]
     if job.status in RETRYABLE_JOB_STATUSES:
         rows.append([InlineKeyboardButton("Retry", callback_data=f"job:retry:{job.id}")])
     if job.normalized_url:

@@ -12,14 +12,23 @@ from ytmusic_jellyfin_bot.ytmusic_metadata import YtMusicMetadataProvider
 
 
 class FakeYtMusicClient:
-    def __init__(self, *, watch=None, albums=None, credits=None, lyrics=None):
+    def __init__(self, *, watch=None, watches=None, search_results=None, albums=None, credits=None, lyrics=None):
         self.watch = watch or {}
+        self.watches = watches or {}
+        self.search_results = search_results or []
+        self.search_calls = []
         self.albums = albums or {}
         self.credits = credits or {}
         self.lyrics = lyrics or {}
 
     def get_watch_playlist(self, *, videoId: str, limit: int) -> dict:
+        if videoId in self.watches:
+            return self.watches[videoId]
         return self.watch
+
+    def search(self, query: str, *, filter: str, limit: int) -> list[dict]:
+        self.search_calls.append((query, filter, limit))
+        return self.search_results
 
     def get_album(self, album_id: str) -> dict:
         return self.albums[album_id]
@@ -271,6 +280,116 @@ class YtMusicMetadataTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.title, "Counterpart Song")
         self.assertEqual(result.metadata["ytmusic_counterpart_video_id"], "target")
 
+    async def test_sparse_video_uses_exact_song_search_fallback(self) -> None:
+        client = FakeYtMusicClient(
+            watches={
+                "video": {
+                    "playlistId": "VIDEO-PL",
+                    "tracks": [
+                        {
+                            "videoId": "video",
+                            "title": "Artist - Song - Official Visualizer",
+                            "artists": [{"name": "Artist"}],
+                            "videoType": "MUSIC_VIDEO_TYPE_OMV",
+                            "duration": "3:30",
+                        }
+                    ],
+                },
+                "song-id": {
+                    "playlistId": "SONG-PL",
+                    "lyrics": "LYRICS",
+                    "tracks": [
+                        {
+                            "videoId": "song-id",
+                            "title": "Song",
+                            "artists": [{"name": "Artist"}],
+                            "album": {"name": "Album", "id": "ALB"},
+                            "videoType": "MUSIC_VIDEO_TYPE_ATV",
+                            "duration": "3:30",
+                        }
+                    ],
+                },
+            },
+            search_results=[
+                {
+                    "resultType": "song",
+                    "videoId": "song-id",
+                    "title": "Song",
+                    "artists": [{"name": "Artist"}],
+                    "album": {"name": "Album", "id": "ALB"},
+                    "duration": "3:30",
+                    "videoType": "MUSIC_VIDEO_TYPE_ATV",
+                }
+            ],
+            albums={
+                "ALB": {
+                    "title": "Album",
+                    "artists": [{"name": "Album Artist"}],
+                    "year": "2026",
+                    "trackCount": "9",
+                    "tracks": [{"videoId": "song-id", "trackNumber": "4", "creditsBrowseId": "CREDITS"}],
+                }
+            },
+            credits={"CREDITS": {"written_by": {"localized_title": "Written by", "data": ["Writer"]}}},
+            lyrics={"LYRICS": {"lyrics": "Words", "source": "YouTube Music"}},
+        )
+        provider, _auth = self._provider(client)
+        item = _item("video")
+        item.metadata["duration"] = 210
+
+        result = await provider.enrich_item(item)
+        metadata = result.metadata
+
+        self.assertEqual(client.search_calls, [("Artist Song", "songs", 10)])
+        self.assertEqual(result.title, "Song")
+        self.assertEqual(metadata["album"], "Album")
+        self.assertEqual(metadata["albumartist"], "Album Artist")
+        self.assertEqual(metadata["track_number"], 4)
+        self.assertEqual(metadata["track_total"], 9)
+        self.assertEqual(metadata["lyrics"], "Words")
+        self.assertEqual(metadata["composer"], "Writer")
+        self.assertEqual(metadata["ytmusic_video_id"], "song-id")
+        self.assertEqual(metadata["ytmusic_counterpart_video_id"], "video")
+        self.assertEqual(metadata["ytmusic_playlist_id"], "SONG-PL")
+
+    async def test_sparse_video_does_not_accept_inexact_song_search_fallback(self) -> None:
+        client = FakeYtMusicClient(
+            watch={
+                "playlistId": "VIDEO-PL",
+                "tracks": [
+                    {
+                        "videoId": "video",
+                        "title": "Rapture",
+                        "artists": [{"name": "Evanescence"}],
+                        "videoType": "MUSIC_VIDEO_TYPE_OMV",
+                        "duration": "3:27",
+                    }
+                ],
+            },
+            search_results=[
+                {
+                    "resultType": "song",
+                    "videoId": "wrong-song",
+                    "title": "My Last Breath",
+                    "artists": [{"name": "Evanescence"}],
+                    "album": {"name": "Fallen", "id": "ALB"},
+                    "duration": "3:27",
+                }
+            ],
+        )
+        provider, _auth = self._provider(client)
+
+        with self.assertLogs("ytmusic_jellyfin_bot.ytmusic_metadata", level="INFO") as logs:
+            result = await provider.enrich_item(_item("video"))
+
+        self.assertEqual(client.search_calls, [("Evanescence Rapture", "songs", 10)])
+        self.assertEqual(result.title, "Rapture")
+        self.assertNotIn("album", result.metadata)
+        self.assertEqual(result.metadata["ytmusic_video_id"], "video")
+        output = "\n".join(logs.output)
+        self.assertIn("ytmusic song search fallback not accepted", output)
+        self.assertIn("missing_rich_fields=album,credits,lyrics,track_number,track_total", output)
+
     async def test_album_credits_lyrics_artwork_and_sanitization_merge(self) -> None:
         client = FakeYtMusicClient(
             watch={
@@ -402,6 +521,7 @@ class YtMusicMetadataTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("lyrics=True", output)
         self.assertIn("credits=True", output)
         self.assertIn("artwork=True", output)
+        self.assertIn("missing_rich_fields=none", output)
         self.assertIn("ytmusic metadata enrichment completed", output)
         self.assertNotIn("Line 1", output)
         self.assertNotIn("Line 2", output)
